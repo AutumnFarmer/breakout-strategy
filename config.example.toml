@@ -1,0 +1,34 @@
+[screener]
+top_n = 30
+max_workers = 6
+history_days = 900
+resistance_lookback_weeks = 52
+min_history_rows = 160
+breakout_buffer = 0.0
+max_extension = 0.12
+min_amount = 80000000
+min_price = 3.0
+allowed_prefixes = ["00", "30", "60", "68"]
+exclude_name_keywords = ["ST", "*ST", "退"]
+
+[paths]
+cache_dir = "data/cache"
+output_dir = "outputs"
+
+[network]
+# macOS system proxies can make AKShare/Eastmoney requests fail when the local proxy is down.
+disable_system_proxy = true
+
+[email]
+enabled = false
+# smtp: use SMTP credentials; mail: use local /usr/bin/mail on the server.
+method = "smtp"
+smtp_host = ""
+smtp_port = 465
+smtp_user = ""
+smtp_password = ""
+smtp_ssl = true
+smtp_starttls = false
+mail_from = ""
+mail_to = []
+subject_prefix = "A股突破选股"
