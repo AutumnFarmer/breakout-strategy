@@ -1,0 +1,169 @@
+from __future__ import annotations
+
+import argparse
+from dataclasses import replace
+import os
+import sys
+from pathlib import Path
+
+from .config import AppConfig, load_config
+from .emailer import send_report, validate_email_transport
+from .backtest import run_backtest
+from .screener import run_scan
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if getattr(args, "env_file", None):
+        load_env_file(Path(args.env_file))
+    config = load_config(Path(args.config) if args.config else None)
+    apply_network_env(config)
+
+    if args.command == "doctor":
+        return _doctor(config, skip_network=args.skip_network)
+    if args.command == "run":
+        return _run(args, config)
+    if args.command == "backtest":
+        return _backtest(args, config)
+
+    parser.print_help()
+    return 2
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="a-breakout", description="A股突破选股自动扫描器")
+    parser.add_argument("--config", default="config.toml", help="TOML config path, default: config.toml")
+    parser.add_argument("--env-file", default="", help="Optional env file for SMTP secrets")
+    sub = parser.add_subparsers(dest="command")
+
+    run = sub.add_parser("run", help="Run daily stock scan")
+    run.add_argument("--symbols", default="", help="Comma separated stock codes for a focused smoke run")
+    run.add_argument("--limit", type=int, default=0, help="Limit the universe size, useful for smoke tests")
+    run.add_argument("--force-refresh", action="store_true", help="Ignore cached history and fetch fresh data")
+    email_group = run.add_mutually_exclusive_group()
+    email_group.add_argument("--send-email", action="store_true", help="Force sending the email report")
+    email_group.add_argument("--no-email", action="store_true", help="Disable email sending for this run")
+
+    doctor = sub.add_parser("doctor", help="Check dependencies and data-source connectivity")
+    doctor.add_argument("--skip-network", action="store_true", help="Do not call AkShare data endpoints")
+
+    backtest = sub.add_parser("backtest", help="Run a coarse historical backtest from cached daily bars")
+    backtest.add_argument("--days", type=int, default=120, help="Number of recent signal days to backtest")
+    backtest.add_argument("--top-n", default="10,20,30", help="Comma separated TopN groups, default: 10,20,30")
+    backtest.add_argument("--holding-days", default="5,10,20", help="Comma separated holding days, default: 5,10,20")
+    backtest.add_argument("--symbols", default="", help="Comma separated stock codes for a focused backtest")
+    backtest.add_argument("--workers", type=int, default=0, help="Override backtest worker threads for this run")
+    return parser
+
+
+def _run(args: argparse.Namespace, config: AppConfig) -> int:
+    symbols = {item.strip() for item in args.symbols.split(",") if item.strip()} or None
+    result = run_scan(
+        config=config,
+        symbols=symbols,
+        limit=args.limit or None,
+        force_refresh=args.force_refresh,
+    )
+    print(f"扫描完成: {result.scanned_count} 只，入选 {len(result.candidates)} 只，失败 {result.failed_count} 只")
+    print(f"CSV: {result.csv_path}")
+    print(f"Excel: {result.xlsx_path}")
+    print(f"日报: {result.markdown_path}")
+    print(f"可视化: {result.html_path}")
+
+    should_send = config.email.enabled
+    if args.send_email:
+        should_send = True
+    if args.no_email:
+        should_send = False
+    if should_send:
+        body = result.markdown_path.read_text(encoding="utf-8")
+        subject = f"{config.email.subject_prefix} {result.latest_trade_date}: {len(result.candidates)} 只候选"
+        send_report(
+            email_config=config.email,
+            subject=subject,
+            body=body,
+            attachments=[result.csv_path, result.xlsx_path, result.html_path],
+        )
+        print("邮件发送完成")
+    else:
+        print("邮件发送已跳过")
+    return 0
+
+
+def _backtest(args: argparse.Namespace, config: AppConfig) -> int:
+    if args.workers and args.workers > 0:
+        config = replace(config, screener=replace(config.screener, max_workers=args.workers))
+    result = run_backtest(
+        config=config,
+        days=max(1, args.days),
+        top_ns=_parse_int_tuple(args.top_n),
+        holding_days=_parse_int_tuple(args.holding_days),
+        symbols={item.strip() for item in args.symbols.split(",") if item.strip()} or None,
+    )
+    print(f"回测完成: {result.stock_count} 只股票，{result.signal_days} 个信号日，{result.trade_count} 笔模拟交易")
+    print(f"交易明细: {result.trades_path}")
+    print(f"汇总结果: {result.summary_path}")
+    print(f"可视化: {result.html_path}")
+    return 0
+
+
+def _doctor(config: AppConfig, skip_network: bool) -> int:
+    print(f"输出目录: {config.paths.output_dir}")
+    print(f"缓存目录: {config.paths.cache_dir}")
+    try:
+        import akshare  # noqa: F401
+        import numpy  # noqa: F401
+        import openpyxl  # noqa: F401
+        import pandas  # noqa: F401
+    except ImportError as exc:
+        print(f"依赖检查失败: {exc}", file=sys.stderr)
+        return 1
+    print("依赖检查: OK")
+
+    if not skip_network:
+        from .data import fetch_spot
+
+        spot = fetch_spot()
+        print(f"A股行情列表: {len(spot)} 行")
+    if config.email.enabled:
+        problems = validate_email_transport(config.email)
+        if problems:
+            print(f"邮件配置不完整: {', '.join(problems)}", file=sys.stderr)
+            return 1
+        print("邮件配置: OK")
+    else:
+        print("邮件配置: 未启用")
+    return 0
+
+
+def load_env_file(path: Path) -> None:
+    path = path.expanduser()
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
+def apply_network_env(config: AppConfig) -> None:
+    if not config.network.disable_system_proxy:
+        return
+    os.environ.setdefault("NO_PROXY", "*")
+    os.environ.setdefault("no_proxy", "*")
+
+
+def _parse_int_tuple(value: str) -> tuple[int, ...]:
+    items = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    if not items:
+        raise ValueError("expected at least one integer")
+    return items
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

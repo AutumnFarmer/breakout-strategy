@@ -1,0 +1,13 @@
+.venv/
+.pytest_cache/
+.idea/
+__pycache__/
+*.pyc
+*.log
+.env
+config.toml
+data/cache/
+outputs/
+site/
+dist/
+*.egg-info/
