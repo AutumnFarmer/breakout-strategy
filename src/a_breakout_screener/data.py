@@ -48,6 +48,7 @@ DEFAULT_TUSHARE_RETRIES = 3
 DEFAULT_TUSHARE_RETRY_DELAY = 2.0
 DEFAULT_TUSHARE_RETRY_MAX_DELAY = 15.0
 DEFAULT_TAG_CACHE_DAYS = 30
+DEFAULT_FINANCIAL_CACHE_DAYS = 30
 MAX_STOCK_TAGS = 8
 GENERIC_CONCEPT_TAGS = {
     "AB股",
@@ -722,6 +723,164 @@ def _stock_tag_cache_is_fresh(cache_path: Path) -> bool:
         return updated_at.date() >= date.today() - timedelta(days=max_age_days)
     except Exception:
         return False
+
+
+def fetch_financial_metrics(symbol: str, cache_dir: Path, force_refresh: bool = False) -> dict[str, object]:
+    """Fetch latest growth/quality metrics for a selected stock.
+
+    This runs only for final candidates. It is a secondary growth-quality lens,
+    not part of the full-market technical breakout scan.
+    """
+    symbol = symbol.zfill(6)
+    cache_path = cache_dir / "financial_metrics" / f"{symbol}.json"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not force_refresh:
+        cached = _read_financial_metrics_cache(cache_path)
+        if cached and _financial_cache_is_fresh(cache_path):
+            return cached
+
+    cached = _read_financial_metrics_cache(cache_path)
+    if not _tushare_enabled():
+        return cached
+
+    try:
+        metrics = _fetch_financial_metrics_from_tushare(symbol)
+    except Exception as exc:  # pragma: no cover - external source variance
+        if cached:
+            warnings.warn(f"{symbol} financial metrics fetch failed; using cached metrics: {exc}", RuntimeWarning)
+            return cached
+        warnings.warn(f"{symbol} financial metrics fetch failed: {exc}", RuntimeWarning)
+        return {}
+    if metrics:
+        _write_financial_metrics_cache(cache_path, metrics)
+    return metrics
+
+
+def _fetch_financial_metrics_from_tushare(symbol: str) -> dict[str, object]:
+    from .tushare_client import get_tushare_pro
+
+    pro = get_tushare_pro()
+    raw = _call_tushare(
+        f"fina_indicator {symbol}",
+        lambda: pro.fina_indicator(
+            ts_code=_tushare_ts_code(symbol),
+            fields=(
+                "ts_code,end_date,ann_date,roe,roe_dt,roa,"
+                "netprofit_yoy,or_yoy,grossprofit_margin,debt_to_assets"
+            ),
+        ),
+    )
+    if raw is None or raw.empty:
+        return {}
+
+    df = raw.copy()
+    df["end_date"] = pd.to_datetime(df["end_date"], format="%Y%m%d", errors="coerce")
+    df = df.dropna(subset=["end_date"]).sort_values("end_date", ascending=False)
+    if df.empty:
+        return {}
+    row = df.iloc[0]
+    metrics: dict[str, object] = {
+        "financial_end_date": row["end_date"].date().isoformat(),
+        "financial_ann_date": _date_text(row.get("ann_date")),
+        "revenue_yoy": _optional_number(row.get("or_yoy")),
+        "profit_yoy": _optional_number(row.get("netprofit_yoy")),
+        "roe": _optional_number(row.get("roe_dt", row.get("roe"))),
+        "gross_margin": _optional_number(row.get("grossprofit_margin")),
+        "debt_to_assets": _optional_number(row.get("debt_to_assets")),
+    }
+    metrics["growth_score"] = _calc_growth_score(metrics)
+    return metrics
+
+
+def _calc_growth_score(metrics: dict[str, object]) -> float:
+    revenue_yoy = _optional_number(metrics.get("revenue_yoy"))
+    profit_yoy = _optional_number(metrics.get("profit_yoy"))
+    roe = _optional_number(metrics.get("roe"))
+    gross_margin = _optional_number(metrics.get("gross_margin"))
+    debt_to_assets = _optional_number(metrics.get("debt_to_assets"))
+
+    score = 0.0
+    available = 0
+    if revenue_yoy is not None:
+        score += _linear_score(revenue_yoy, -10, 40, 0, 25)
+        available += 25
+    if profit_yoy is not None:
+        score += _linear_score(profit_yoy, -20, 60, 0, 25)
+        available += 25
+    if roe is not None:
+        score += _linear_score(roe, 0, 18, 0, 20)
+        available += 20
+    if gross_margin is not None:
+        score += _linear_score(gross_margin, 10, 45, 0, 15)
+        available += 15
+    if debt_to_assets is not None:
+        score += _linear_score(80 - debt_to_assets, 0, 50, 0, 15)
+        available += 15
+    if not available:
+        return 0.0
+    return round(score / available * 100, 2)
+
+
+def _linear_score(value: float, low: float, high: float, min_score: float, max_score: float) -> float:
+    if value <= low:
+        return min_score
+    if value >= high:
+        return max_score
+    return min_score + (value - low) / (high - low) * (max_score - min_score)
+
+
+def _read_financial_metrics_cache(cache_path: Path) -> dict[str, object]:
+    if not cache_path.exists():
+        return {}
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        metrics = payload.get("metrics", {})
+        return metrics if isinstance(metrics, dict) else {}
+    except Exception as exc:  # pragma: no cover - corrupt local cache path
+        warnings.warn(f"discarding invalid financial cache {cache_path}: {exc}", RuntimeWarning)
+        return {}
+
+
+def _write_financial_metrics_cache(cache_path: Path, metrics: dict[str, object]) -> None:
+    cache_path.write_text(
+        json.dumps({"updated_at": date.today().isoformat(), "metrics": metrics}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _financial_cache_is_fresh(cache_path: Path) -> bool:
+    max_age_days = _env_int("STOCK_FINANCIAL_CACHE_DAYS", DEFAULT_FINANCIAL_CACHE_DAYS)
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        updated_at = pd.to_datetime(payload.get("updated_at"), errors="coerce")
+        if pd.isna(updated_at):
+            return False
+        return updated_at.date() >= date.today() - timedelta(days=max_age_days)
+    except Exception:
+        return False
+
+
+def _optional_number(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(number):
+        return None
+    return number
+
+
+def _date_text(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parsed = pd.to_datetime(text, format="%Y%m%d", errors="coerce")
+    if pd.isna(parsed):
+        return text
+    return parsed.date().isoformat()
 
 
 def _tushare_enabled() -> bool:

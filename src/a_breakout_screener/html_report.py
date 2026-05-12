@@ -56,6 +56,13 @@ def _candidate_payload(rank: int, item: Candidate) -> dict[str, Any]:
         "atrPct": round(item.atr_pct * 100, 4),
         "circMv": round(item.circ_mv, 2) if item.circ_mv > 0 else 0,
         "score": round(item.score, 4),
+        "growthScore": round(item.growth_score, 4) if item.growth_score > 0 else 0,
+        "financialEndDate": item.financial_end_date,
+        "revenueYoy": _rounded(item.revenue_yoy, 4),
+        "profitYoy": _rounded(item.profit_yoy, 4),
+        "roe": _rounded(item.roe, 4),
+        "grossMargin": _rounded(item.gross_margin, 4),
+        "debtToAssets": _rounded(item.debt_to_assets, 4),
         "buyLow": round(item.buy_zone_low, 4),
         "buyHigh": round(item.buy_zone_high, 4),
         "stopLoss": round(item.stop_loss, 4),
@@ -265,6 +272,10 @@ HTML_TEMPLATE = """<!doctype html>
       font-weight: 700;
       color: var(--accent);
     }
+    .growth {
+      font-weight: 700;
+      color: #7a4f00;
+    }
     .tags {
       display: flex;
       align-items: center;
@@ -468,6 +479,7 @@ HTML_TEMPLATE = """<!doctype html>
               <th>量趋势</th>
               <th>ATR%</th>
               <th>得分</th>
+              <th>成长</th>
               <th class="name">标签</th>
             </tr>
           </thead>
@@ -505,6 +517,11 @@ HTML_TEMPLATE = """<!doctype html>
         <div class="detail"><span>聚类大小</span><strong id="cluster"></strong></div>
         <div class="detail"><span>ATR%</span><strong id="atr"></strong></div>
         <div class="detail"><span>选中K线</span><strong id="hoverInfo"></strong></div>
+        <div class="detail"><span>财务期</span><strong id="financialDate"></strong></div>
+        <div class="detail"><span>成长分</span><strong id="growthScore"></strong></div>
+        <div class="detail"><span>营收同比</span><strong id="revenueYoy"></strong></div>
+        <div class="detail"><span>净利同比</span><strong id="profitYoy"></strong></div>
+        <div class="detail"><span>ROE</span><strong id="roe"></strong></div>
         <div class="detail wide"><span>题材标签</span><strong id="tagDetail"></strong></div>
       </div>
       <div class="ai-panel" id="aiPanel">
@@ -536,6 +553,10 @@ HTML_TEMPLATE = """<!doctype html>
     const fmt = (value, digits = 2) => {
       if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
       return Number(value).toFixed(digits);
+    };
+    const fmtPct = (value, digits = 1) => {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+      return `${Number(value).toFixed(digits)}%`;
     };
 
     document.getElementById("statDate").textContent = DASHBOARD.meta.latestTradeDate;
@@ -629,7 +650,7 @@ HTML_TEMPLATE = """<!doctype html>
       if (!rows.length) {
         const row = document.createElement("tr");
         const cell = document.createElement("td");
-        cell.colSpan = 11;
+        cell.colSpan = 12;
         cell.className = "empty";
         cell.textContent = DASHBOARD.candidates.length ? "当前标签下没有候选。" : "今日没有符合条件的候选。";
         row.appendChild(cell);
@@ -651,11 +672,12 @@ HTML_TEMPLATE = """<!doctype html>
           fmt(item.volumeTrend),
           `${fmt(item.atrPct)}%`,
           fmt(item.score, 1),
+          item.growthScore > 0 ? fmt(item.growthScore, 1) : "-",
           ""
         ];
         cells.forEach((value, idx) => {
           const cell = document.createElement("td");
-          if (idx === 10) {
+          if (idx === 11) {
             cell.className = "name";
             const tags = document.createElement("div");
             tags.className = "tags";
@@ -674,8 +696,9 @@ HTML_TEMPLATE = """<!doctype html>
             cell.textContent = value;
           }
           if (idx === 1) cell.className = "name";
-          if (idx === 4 && item.breakoutPct > 0) cell.classList.add("strong");
+          if (idx === 5 && item.breakoutPct > 0) cell.classList.add("strong");
           if (idx === 9) cell.classList.add("score");
+          if (idx === 10) cell.classList.add("growth");
           row.appendChild(cell);
         });
         row.addEventListener("click", () => {
@@ -754,7 +777,10 @@ HTML_TEMPLATE = """<!doctype html>
       if (!item) {
         document.getElementById("chartName").textContent = "历史K线";
         document.getElementById("chartMeta").textContent = "";
-        ["buyZone", "stopLoss", "touches", "cluster", "atr", "hoverInfo", "tagDetail"].forEach(id => {
+        [
+          "buyZone", "stopLoss", "touches", "cluster", "atr", "hoverInfo",
+          "financialDate", "growthScore", "revenueYoy", "profitYoy", "roe", "tagDetail"
+        ].forEach(id => {
           document.getElementById(id).textContent = "-";
         });
         return;
@@ -765,12 +791,17 @@ HTML_TEMPLATE = """<!doctype html>
 
       document.getElementById("chartName").textContent = `${item.code} ${item.name}`;
       document.getElementById("chartMeta").textContent =
-        `收盘 ${fmt(item.latestClose)} / 市值 ${item.circMv > 0 ? fmt(item.circMv, 1) + '亿' : '-'} / 阻力 ${fmt(item.resistance)} / 突破 ${fmt(item.breakoutPct)}% / 得分 ${fmt(item.score, 1)} / ${item.hint}`;
+        `收盘 ${fmt(item.latestClose)} / 市值 ${item.circMv > 0 ? fmt(item.circMv, 1) + '亿' : '-'} / 阻力 ${fmt(item.resistance)} / 突破 ${fmt(item.breakoutPct)}% / 技术 ${fmt(item.score, 1)} / 成长 ${item.growthScore > 0 ? fmt(item.growthScore, 1) : '-'} / ${item.hint}`;
       document.getElementById("buyZone").textContent = `${fmt(item.buyLow)} - ${fmt(item.buyHigh)}`;
       document.getElementById("stopLoss").textContent = fmt(item.stopLoss);
       document.getElementById("touches").textContent = `${item.touches} 次`;
       document.getElementById("cluster").textContent = `${item.clusterSize || "-"} 根K线`;
       document.getElementById("atr").textContent = `${fmt(item.atrPct)}%`;
+      document.getElementById("financialDate").textContent = item.financialEndDate || "-";
+      document.getElementById("growthScore").textContent = item.growthScore > 0 ? fmt(item.growthScore, 1) : "-";
+      document.getElementById("revenueYoy").textContent = fmtPct(item.revenueYoy);
+      document.getElementById("profitYoy").textContent = fmtPct(item.profitYoy);
+      document.getElementById("roe").textContent = fmtPct(item.roe);
       document.getElementById("tagDetail").textContent = (item.tags || []).length ? item.tags.join(" / ") : "-";
 
       if (!data.length) {

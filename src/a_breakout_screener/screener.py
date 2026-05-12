@@ -13,6 +13,7 @@ from .config import AppConfig
 from .ai_analysis import generate_ai_analysis
 from .data import (
     fetch_daily_basic,
+    fetch_financial_metrics,
     fetch_history,
     fetch_index_history,
     fetch_spot,
@@ -128,6 +129,9 @@ def run_scan(
     tag_map = _fetch_tags_for_candidates(candidates, config, force_refresh=force_refresh)
     if tag_map:
         candidates = [item.with_tags(tag_map.get(item.code, ())) for item in candidates]
+    financial_map = _fetch_financials_for_candidates(candidates, config, force_refresh=force_refresh)
+    if financial_map:
+        candidates = [item.with_financial_metrics(financial_map.get(item.code, {})) for item in candidates]
     history_by_code = {item.code: history_by_code[item.code] for item in candidates if item.code in history_by_code}
     latest_trade_date = max((item.latest_trade_date.isoformat() for item in candidates), default=end_date.isoformat())
     ai_analysis = generate_ai_analysis(
@@ -219,14 +223,14 @@ def render_markdown_report(
 
     lines.extend(
         [
-            "|排名|代码|名称|标签|收盘|市值(亿)|阻力|突破%|量能比|量趋势|触达|聚类|ATR%|得分|买入区|止损|提示|",
-            "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---|",
+            "|排名|代码|名称|标签|收盘|市值(亿)|阻力|突破%|量能比|量趋势|触达|聚类|ATR%|技术分|成长分|营收同比%|净利同比%|ROE%|买入区|止损|提示|",
+            "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---|",
         ]
     )
     for idx, item in enumerate(candidates, start=1):
         lines.append(
             "|{rank}|{code}|{name}|{tags}|{close:.2f}|{mv}|{resistance:.2f}|{breakout:.2f}|"
-            "{vr:.2f}|{vt:.2f}|{touches}|{cluster}|{atr:.1f}|{score:.1f}|"
+            "{vr:.2f}|{vt:.2f}|{touches}|{cluster}|{atr:.1f}|{score:.1f}|{growth}|{revenue}|{profit}|{roe}|"
             "{buy_low:.2f}-{buy_high:.2f}|{stop:.2f}|{hint}|".format(
                 rank=idx,
                 code=item.code,
@@ -242,6 +246,10 @@ def render_markdown_report(
                 cluster=item.resistance_cluster_size,
                 atr=item.atr_pct * 100,
                 score=item.score,
+                growth=f"{item.growth_score:.1f}" if item.growth_score > 0 else "-",
+                revenue=_fmt_optional(item.revenue_yoy),
+                profit=_fmt_optional(item.profit_yoy),
+                roe=_fmt_optional(item.roe),
                 buy_low=item.buy_zone_low,
                 buy_high=item.buy_zone_high,
                 stop=item.stop_loss,
@@ -273,6 +281,33 @@ def _fetch_tags_for_candidates(
             except Exception:  # pragma: no cover - tags are non-critical external metadata
                 tag_map[code] = ()
     return tag_map
+
+
+def _fetch_financials_for_candidates(
+    candidates: list[Candidate],
+    config: AppConfig,
+    force_refresh: bool,
+) -> dict[str, dict[str, object]]:
+    if not candidates:
+        return {}
+    max_workers = min(4, max(1, config.screener.max_workers))
+    financial_map: dict[str, dict[str, object]] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(fetch_financial_metrics, item.code, config.paths.cache_dir, force_refresh): item.code
+            for item in candidates
+        }
+        for future in as_completed(futures):
+            code = futures[future]
+            try:
+                financial_map[code] = future.result()
+            except Exception:  # pragma: no cover - financial metadata is non-critical
+                financial_map[code] = {}
+    return financial_map
+
+
+def _fmt_optional(value: float | None) -> str:
+    return f"{value:.1f}" if value is not None else "-"
 
 
 def _check_one(
@@ -366,7 +401,8 @@ def _write_blocked_result(output_dir: Path, reason: str, latest_trade_date: str)
     )
     cols = ["代码", "名称", "最新收盘", "阻力位", "突破幅度%", "量能比", "量能趋势", "阻力触达次数",
             "阻力聚类大小", "月线跨度%", "ATR%", "MA10", "MA20", "得分", "首次阻力日期", "最近阻力日期",
-            "最新交易日", "建议买入区", "止损位", "流通市值(亿)", "仓位提示", "题材标签"]
+            "最新交易日", "建议买入区", "止损位", "流通市值(亿)", "仓位提示", "题材标签",
+            "财务期", "成长分", "营收同比%", "净利同比%", "ROE%", "毛利率%", "资产负债率%"]
     pd.DataFrame(columns=cols).to_csv(csv_path, index=False, encoding="utf-8-sig")
     with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
         pd.DataFrame(columns=cols).to_excel(writer, index=False, sheet_name="突破候选")

@@ -113,3 +113,42 @@ def test_fetch_stock_tags_filters_generic_tags_and_uses_cache(monkeypatch, tmp_p
     monkeypatch.setattr("a_breakout_screener.tushare_client.get_tushare_pro", lambda: (_ for _ in ()).throw(RuntimeError("down")))
 
     assert data.fetch_stock_tags("300750", tmp_path) == tags
+
+
+def test_fetch_financial_metrics_scores_and_uses_cache(monkeypatch, tmp_path) -> None:
+    class FakePro:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def fina_indicator(self, **kwargs):
+            self.calls += 1
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": "300750.SZ",
+                        "end_date": "20260331",
+                        "ann_date": "20260416",
+                        "roe_dt": 5.2,
+                        "netprofit_yoy": 48.5,
+                        "or_yoy": 52.4,
+                        "grossprofit_margin": 24.8,
+                        "debt_to_assets": 62.3,
+                    }
+                ]
+            )
+
+    fake_pro = FakePro()
+    monkeypatch.setenv("TUSHARE_TOKEN", "token")
+    monkeypatch.setattr("a_breakout_screener.tushare_client.get_tushare_pro", lambda: fake_pro)
+
+    metrics = data.fetch_financial_metrics("300750", tmp_path)
+
+    assert metrics["financial_end_date"] == "2026-03-31"
+    assert metrics["revenue_yoy"] == 52.4
+    assert metrics["profit_yoy"] == 48.5
+    assert metrics["growth_score"] > 0
+    assert (tmp_path / "financial_metrics" / "300750.json").exists()
+
+    monkeypatch.setattr("a_breakout_screener.tushare_client.get_tushare_pro", lambda: (_ for _ in ()).throw(RuntimeError("down")))
+
+    assert data.fetch_financial_metrics("300750", tmp_path) == metrics

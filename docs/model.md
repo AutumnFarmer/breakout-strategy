@@ -7,6 +7,7 @@
 - 全市场列表: `ak.stock_zh_a_spot_em()`
 - 个股历史日线: `ak.stock_zh_a_hist(symbol, period="daily", adjust="qfq")`
 - 周线由本地从日线按 `W-FRI` 聚合生成
+- Tushare 可用时用于行情、题材 tag、流通市值和候选股财务成长指标
 
 ## 默认过滤
 
@@ -23,6 +24,16 @@
 - 最新成交量相对近 20 日均量放大但不过热时得分更高
 - 过去一年越多次触达阻力位，阻力有效性得分越高
 
+## 成长性复核
+
+全市场筛选仍以突破技术指标为核心。最终 TopN 候选出来后，系统再补充非阻断的成长性数据:
+
+- 题材/行业 tag: 用于观察市场热点和板块聚类
+- 财务期、营收同比、净利同比、ROE、毛利率、资产负债率
+- 成长分: 将收入增长、利润增长、ROE、毛利率和负债水平折算为 0-100 的辅助分
+
+成长分不直接替代技术突破得分。它用于区分“只有短线量价突破”和“量价突破同时具备基本面成长证据”的候选，供网页端和 AI 分析员复核。
+
 ## 输出
 
 每日输出三个文件:
@@ -30,8 +41,10 @@
 - `breakout_candidates.csv`
 - `breakout_candidates.xlsx`
 - `breakout_report.md`
+- `breakout_dashboard.html`
+- `ai_analysis.md`
 
-邮件正文使用 Markdown 报告，附件包含 CSV 和 Excel。
+邮件正文使用 Markdown 报告，附件包含 CSV、Excel 和 HTML 仪表盘。
 
 ## 风险边界
 

@@ -54,7 +54,14 @@ TUSHARE_RETRY_DELAY=2
 TUSHARE_RETRY_MAX_DELAY=15
 ```
 
-题材 tag 只会在最终 TopN 候选出来后补充，不参与全市场预筛选，避免为了概念数据拖慢全量扫描。优先使用 Tushare `stock_basic`/`concept_detail`，失败时退回 AkShare 个股行业信息，并写入 `data/cache/stock_tags/` 缓存。
+题材 tag 和财务成长指标只会在最终 TopN 候选出来后补充，不参与全市场预筛选，避免为了辅助数据拖慢全量扫描。题材优先使用 Tushare `stock_basic`/`concept_detail`，失败时退回 AkShare 个股行业信息，并写入 `data/cache/stock_tags/` 缓存。成长指标使用 Tushare `fina_indicator`，输出成长分、营收同比、净利同比、ROE、毛利率和资产负债率，并写入 `data/cache/financial_metrics/` 缓存。
+
+辅助数据缓存天数可通过环境变量调整:
+
+```bash
+STOCK_TAG_CACHE_DAYS=30
+STOCK_FINANCIAL_CACHE_DAYS=30
+```
 
 AI 分析默认关闭；服务器可通过本机 Sub2API 网关调用 `gpt-5.5`:
 

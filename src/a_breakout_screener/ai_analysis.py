@@ -58,9 +58,10 @@ def _build_prompt(
         "2. 从宏观环境角度讨论可能影响这些主线的因素，例如政策、流动性、汇率、出口、地产、"
         "利率、业绩兑现和风险偏好；不要编造具体未提供的新闻事实。\n"
         "3. 评估未来是否有预期：只能用“需要验证/值得跟踪/风险较高”等审慎表述，不能承诺收益。\n"
-        "4. 挑 5-8 只最需要复核的候选，说明关注理由、需要确认的催化/业绩/成交信号和主要风险。\n"
-        "5. 最后给出“明日/下次扫描观察清单”：需要关注的tag、量价确认、止损纪律。\n"
-        "6. 这是研究辅助，不是投资建议；不得使用确定性买卖指令。\n\n"
+        "4. 结合成长分、营收同比、净利同比、ROE 等财务指标，区分“技术突破强但成长证据弱”和“量价与成长性共振”的候选。\n"
+        "5. 挑 5-8 只最需要复核的候选，说明关注理由、需要确认的催化/业绩/成交信号和主要风险。\n"
+        "6. 最后给出“明日/下次扫描观察清单”：需要关注的tag、量价确认、成长指标反证、止损纪律。\n"
+        "7. 这是研究辅助，不是投资建议；不得使用确定性买卖指令。\n\n"
         "请控制在 1200-1800 中文字以内，不要输出大表格。\n\n"
         "输出结构固定为：\n"
         "## 总体判断\n"
@@ -87,10 +88,21 @@ def _candidate_summary(rank: int, item: Candidate) -> dict[str, Any]:
         "volume_trend": round(item.volume_trend, 2),
         "atr_pct": round(item.atr_pct * 100, 2),
         "score": round(item.score, 1),
+        "growth_score": round(item.growth_score, 1) if item.growth_score > 0 else None,
+        "financial_end_date": item.financial_end_date or None,
+        "revenue_yoy": _rounded_optional(item.revenue_yoy),
+        "profit_yoy": _rounded_optional(item.profit_yoy),
+        "roe": _rounded_optional(item.roe),
+        "gross_margin": _rounded_optional(item.gross_margin),
+        "debt_to_assets": _rounded_optional(item.debt_to_assets),
         "buy_zone": [round(item.buy_zone_low, 2), round(item.buy_zone_high, 2)],
         "stop_loss": round(item.stop_loss, 2),
         "position_hint": item.position_hint,
     }
+
+
+def _rounded_optional(value: float | None) -> float | None:
+    return round(value, 2) if value is not None else None
 
 
 def _call_sub2api(config: AIAnalysisConfig, api_key: str, prompt: str, max_tokens: int) -> str:

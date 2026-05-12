@@ -27,6 +27,13 @@ def test_write_outputs_creates_report_files(tmp_path) -> None:
         stop_loss=11.0,
         position_hint="强观察：可小仓试探，等待回踩确认",
         tags=("银行", "金融科技"),
+        financial_end_date="2026-03-31",
+        revenue_yoy=12.5,
+        profit_yoy=18.2,
+        roe=9.8,
+        gross_margin=42.1,
+        debt_to_assets=58.0,
+        growth_score=72.4,
     )
 
     csv_path, xlsx_path, markdown_path, html_path = write_outputs(
@@ -48,6 +55,8 @@ def test_write_outputs_creates_report_files(tmp_path) -> None:
     assert "A股突破选股复核" in html
     assert "tagFilter" in html
     assert "金融科技" in html
+    assert "成长分" in html
+    assert "revenueYoy" in html
     assert "AI选股分析员" in html
     assert (tmp_path / "ai_analysis.md").exists()
 

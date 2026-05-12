@@ -29,6 +29,13 @@ class Candidate:
     circ_mv: float = 0.0
     position_hint: str = ""
     tags: tuple[str, ...] = field(default_factory=tuple)
+    financial_end_date: str = ""
+    revenue_yoy: float | None = None
+    profit_yoy: float | None = None
+    roe: float | None = None
+    gross_margin: float | None = None
+    debt_to_assets: float | None = None
+    growth_score: float = 0.0
 
     def to_chinese_dict(self) -> dict[str, object]:
         data = {
@@ -54,6 +61,13 @@ class Candidate:
             "流通市值(亿)": round(self.circ_mv, 2) if self.circ_mv > 0 else "",
             "仓位提示": self.position_hint,
             "题材标签": " / ".join(self.tags),
+            "财务期": self.financial_end_date,
+            "成长分": round(self.growth_score, 2) if self.growth_score > 0 else "",
+            "营收同比%": _round_optional(self.revenue_yoy),
+            "净利同比%": _round_optional(self.profit_yoy),
+            "ROE%": _round_optional(self.roe),
+            "毛利率%": _round_optional(self.gross_margin),
+            "资产负债率%": _round_optional(self.debt_to_assets),
         }
         return data
 
@@ -63,5 +77,30 @@ class Candidate:
     def with_tags(self, tags: tuple[str, ...] | list[str]) -> Candidate:
         return replace(self, tags=tuple(tags))
 
+    def with_financial_metrics(self, metrics: dict[str, object]) -> Candidate:
+        return replace(
+            self,
+            financial_end_date=str(metrics.get("financial_end_date") or ""),
+            revenue_yoy=_optional_float(metrics.get("revenue_yoy")),
+            profit_yoy=_optional_float(metrics.get("profit_yoy")),
+            roe=_optional_float(metrics.get("roe")),
+            gross_margin=_optional_float(metrics.get("gross_margin")),
+            debt_to_assets=_optional_float(metrics.get("debt_to_assets")),
+            growth_score=float(metrics.get("growth_score") or 0.0),
+        )
+
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _round_optional(value: float | None) -> float | str:
+    return round(value, 2) if value is not None else ""
