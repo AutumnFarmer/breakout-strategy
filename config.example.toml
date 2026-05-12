@@ -10,6 +10,19 @@ min_amount = 80000000
 min_price = 3.0
 allowed_prefixes = ["00", "30", "60", "68"]
 exclude_name_keywords = ["ST", "*ST", "退"]
+# market_regime: "all" = 不检查大盘, "bull_only" = 仅在沪深300 > MA60 时选股
+market_regime = "all"
+market_index = "000300"
+# confirmation_bars: 0 = 不确认, N = 要求突破后至少 N 个交易日收盘站稳阻力上方
+confirmation_bars = 0
+# ma_trend_period: 0 = 不检查长期趋势, 200 = 要求收盘价站上 MA200
+ma_trend_period = 0
+# max_open_gap_pct: 0 = 不过滤跳空, 0.02 = 开盘高于阻力 2% 以上则过滤
+max_open_gap_pct = 0.0
+# consolidation_*: 盘整质量扣分，默认关闭；例如 weeks=6, max_span=0.08, penalty_weight=8
+consolidation_weeks = 0
+consolidation_max_span = 0.0
+consolidation_penalty_weight = 0.0
 
 [paths]
 cache_dir = "data/cache"

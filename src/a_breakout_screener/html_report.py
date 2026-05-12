@@ -48,7 +48,11 @@ def _candidate_payload(rank: int, item: Candidate) -> dict[str, Any]:
         "resistance": round(item.resistance, 4),
         "breakoutPct": round(item.breakout_pct * 100, 4),
         "volumeRatio": round(item.volume_ratio, 4),
+        "volumeTrend": round(item.volume_trend, 4),
         "touches": item.resistance_touches,
+        "clusterSize": item.resistance_cluster_size,
+        "atrPct": round(item.atr_pct * 100, 4),
+        "circMv": round(item.circ_mv, 2) if item.circ_mv > 0 else 0,
         "score": round(item.score, 4),
         "buyLow": round(item.buy_zone_low, 4),
         "buyHigh": round(item.buy_zone_high, 4),
@@ -330,9 +334,12 @@ HTML_TEMPLATE = """<!doctype html>
               <th>排名</th>
               <th class="name">股票</th>
               <th>收盘</th>
+              <th>市值(亿)</th>
               <th>阻力</th>
               <th>突破</th>
               <th>量比</th>
+              <th>量趋势</th>
+              <th>ATR%</th>
               <th>得分</th>
             </tr>
           </thead>
@@ -359,6 +366,8 @@ HTML_TEMPLATE = """<!doctype html>
         <div class="detail"><span>买入区</span><strong id="buyZone"></strong></div>
         <div class="detail"><span>止损位</span><strong id="stopLoss"></strong></div>
         <div class="detail"><span>阻力触达</span><strong id="touches"></strong></div>
+        <div class="detail"><span>聚类大小</span><strong id="cluster"></strong></div>
+        <div class="detail"><span>ATR%</span><strong id="atr"></strong></div>
         <div class="detail"><span>选中K线</span><strong id="hoverInfo"></strong></div>
       </div>
     </section>
@@ -391,7 +400,7 @@ HTML_TEMPLATE = """<!doctype html>
       if (!DASHBOARD.candidates.length) {
         const row = document.createElement("tr");
         const cell = document.createElement("td");
-        cell.colSpan = 7;
+        cell.colSpan = 10;
         cell.className = "empty";
         cell.textContent = "今日没有符合条件的候选。";
         row.appendChild(cell);
@@ -406,9 +415,12 @@ HTML_TEMPLATE = """<!doctype html>
           item.rank,
           `${item.code} ${item.name}`,
           fmt(item.latestClose),
+          item.circMv > 0 ? fmt(item.circMv, 1) : "-",
           fmt(item.resistance),
           `${fmt(item.breakoutPct)}%`,
           fmt(item.volumeRatio),
+          fmt(item.volumeTrend),
+          `${fmt(item.atrPct)}%`,
           fmt(item.score, 1)
         ];
         cells.forEach((value, idx) => {
@@ -416,7 +428,7 @@ HTML_TEMPLATE = """<!doctype html>
           cell.textContent = value;
           if (idx === 1) cell.className = "name";
           if (idx === 4 && item.breakoutPct > 0) cell.classList.add("strong");
-          if (idx === 6) cell.classList.add("score");
+          if (idx === 8) cell.classList.add("score");
           row.appendChild(cell);
         });
         row.addEventListener("click", () => {
@@ -476,10 +488,12 @@ HTML_TEMPLATE = """<!doctype html>
 
       document.getElementById("chartName").textContent = `${item.code} ${item.name}`;
       document.getElementById("chartMeta").textContent =
-        `收盘 ${fmt(item.latestClose)} / 阻力 ${fmt(item.resistance)} / 突破 ${fmt(item.breakoutPct)}% / 得分 ${fmt(item.score, 1)} / ${item.hint}`;
+        `收盘 ${fmt(item.latestClose)} / 市值 ${item.circMv > 0 ? fmt(item.circMv, 1) + '亿' : '-'} / 阻力 ${fmt(item.resistance)} / 突破 ${fmt(item.breakoutPct)}% / 得分 ${fmt(item.score, 1)} / ${item.hint}`;
       document.getElementById("buyZone").textContent = `${fmt(item.buyLow)} - ${fmt(item.buyHigh)}`;
       document.getElementById("stopLoss").textContent = fmt(item.stopLoss);
       document.getElementById("touches").textContent = `${item.touches} 次`;
+      document.getElementById("cluster").textContent = `${item.clusterSize || "-"} 根K线`;
+      document.getElementById("atr").textContent = `${fmt(item.atrPct)}%`;
 
       if (!data.length) {
         ctx.fillStyle = "#667085";

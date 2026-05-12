@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date
 
 
@@ -12,18 +12,22 @@ class Candidate:
     resistance: float
     breakout_pct: float
     volume_ratio: float
-    resistance_touches: int
-    monthly_span_pct: float
-    ma10: float
-    ma20: float
-    score: float
-    first_resistance_date: date | None
-    last_resistance_date: date | None
-    latest_trade_date: date
-    buy_zone_low: float
-    buy_zone_high: float
-    stop_loss: float
-    position_hint: str
+    volume_trend: float = 0.0
+    resistance_touches: int = 0
+    resistance_cluster_size: int = 0
+    monthly_span_pct: float = 0.0
+    ma10: float = 0.0
+    ma20: float = 0.0
+    atr_pct: float = 0.0
+    score: float = 0.0
+    first_resistance_date: date | None = None
+    last_resistance_date: date | None = None
+    latest_trade_date: date = field(default_factory=date.today)
+    buy_zone_low: float = 0.0
+    buy_zone_high: float = 0.0
+    stop_loss: float = 0.0
+    circ_mv: float = 0.0
+    position_hint: str = ""
 
     def to_chinese_dict(self) -> dict[str, object]:
         data = {
@@ -33,8 +37,11 @@ class Candidate:
             "阻力位": round(self.resistance, 2),
             "突破幅度%": round(self.breakout_pct * 100, 2),
             "量能比": round(self.volume_ratio, 2),
+            "量能趋势": round(self.volume_trend, 2),
             "阻力触达次数": self.resistance_touches,
+            "阻力聚类大小": self.resistance_cluster_size,
             "月线跨度%": round(self.monthly_span_pct * 100, 2),
+            "ATR%": round(self.atr_pct * 100, 2),
             "MA10": round(self.ma10, 2),
             "MA20": round(self.ma20, 2),
             "得分": round(self.score, 2),
@@ -43,9 +50,13 @@ class Candidate:
             "最新交易日": self.latest_trade_date.isoformat(),
             "建议买入区": f"{self.buy_zone_low:.2f}-{self.buy_zone_high:.2f}",
             "止损位": round(self.stop_loss, 2),
+            "流通市值(亿)": round(self.circ_mv, 2) if self.circ_mv > 0 else "",
             "仓位提示": self.position_hint,
         }
         return data
+
+    def with_circ_mv(self, circ_mv: float) -> Candidate:
+        return replace(self, circ_mv=circ_mv)
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

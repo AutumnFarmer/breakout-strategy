@@ -412,5 +412,128 @@ def _akshare():
     return ak
 
 
+def fetch_index_history(
+    index_code: str,
+    start_date: date,
+    end_date: date,
+    cache_dir: Path,
+) -> pd.DataFrame:
+    """Fetch daily bars for a market index (e.g. 000300 for CSI 300)."""
+    index_code = index_code.zfill(6)
+    cache_path = cache_dir / "hist" / f"index_{index_code}.csv"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cached = _read_history_cache(cache_path)
+    if not cached.empty and cached["date"].max().date() >= end_date:
+        return _slice_history(cached, start_date, end_date)
+
+    try:
+        fresh = _fetch_index_from_source(index_code, start_date, end_date)
+    except Exception as exc:  # pragma: no cover - external data-source fallback path
+        if not cached.empty:
+            warnings.warn(f"{index_code} index fetch failed; using cached data: {exc}", RuntimeWarning)
+            return _slice_history(cached, start_date, end_date)
+        raise
+    if cached.empty:
+        merged = fresh
+    else:
+        merged = pd.concat([cached, fresh], ignore_index=True)
+        merged = merged.drop_duplicates(subset=["date"], keep="last")
+        merged = merged.sort_values("date").reset_index(drop=True)
+    merged.to_csv(cache_path, index=False)
+    return _slice_history(merged, start_date, end_date)
+
+
+def _fetch_index_from_source(index_code: str, start_date: date, end_date: date) -> pd.DataFrame:
+    if _tushare_enabled():
+        try:
+            return _fetch_index_from_tushare(index_code, start_date, end_date)
+        except Exception as exc:  # pragma: no cover - fallback path
+            warnings.warn(f"Tushare index fetch failed; falling back to AkShare: {exc}", RuntimeWarning)
+    return _fetch_index_from_akshare(index_code, start_date, end_date)
+
+
+def _fetch_index_from_tushare(index_code: str, start_date: date, end_date: date) -> pd.DataFrame:
+    from .tushare_client import get_tushare_pro
+
+    if index_code.startswith(("60", "68", "90", "00")):
+        ts_code = f"{index_code}.SH"
+    else:
+        ts_code = f"{index_code}.SZ"
+
+    raw = get_tushare_pro().index_daily(
+        ts_code=ts_code,
+        start_date=start_date.strftime("%Y%m%d"),
+        end_date=end_date.strftime("%Y%m%d"),
+    )
+    if raw is None or raw.empty:
+        raise RuntimeError(f"Tushare index_daily returned no rows for {ts_code}")
+    df = raw.rename(columns={"trade_date": "date", "vol": "volume"}).copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    for col in ("open", "close", "high", "low", "volume", "amount"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "amount" not in df.columns:
+        df["amount"] = 0
+    return df.dropna(subset=["date", "open", "close", "high", "low"]).sort_values("date").reset_index(drop=True)
+
+
+def _fetch_index_from_akshare(index_code: str, start_date: date, end_date: date) -> pd.DataFrame:
+    ak = _akshare()
+    if index_code.startswith(("60", "68", "90", "00")):
+        symbol = f"sh{index_code}"
+    else:
+        symbol = f"sz{index_code}"
+
+    raw = ak.stock_zh_index_daily(symbol=symbol)
+    if raw is None or raw.empty:
+        raise RuntimeError(f"AkShare index_daily returned no rows for {symbol}")
+    df = raw.rename(columns={"date": "date"}).copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    for col in ("open", "close", "high", "low", "volume", "amount"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "amount" not in df.columns:
+        df["amount"] = 0
+    df = df.dropna(subset=["date", "open", "close", "high", "low"]).sort_values("date").reset_index(drop=True)
+    return df[(df["date"] >= pd.Timestamp(start_date)) & (df["date"] <= pd.Timestamp(end_date))]
+
+
+def fetch_daily_basic(trade_date: str, cache_dir: Path) -> dict[str, float]:
+    """Fetch daily basic info (market cap, PE, PB) for all stocks on a trade date.
+
+    Returns a dict mapping 6-digit code → circ_mv in 亿元.
+    """
+    cache_path = cache_dir / "tushare_daily_basic" / f"{trade_date}.csv"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if cache_path.exists():
+        df = pd.read_csv(cache_path, dtype={"code": str})
+        df["code"] = df["code"].str.zfill(6)
+        return dict(zip(df["code"], df["circ_mv"]))
+
+    if not _tushare_enabled():
+        return {}
+
+    from .tushare_client import get_tushare_pro
+
+    pro = get_tushare_pro()
+    raw = pro.daily_basic(trade_date=trade_date)
+    if raw is None or raw.empty:
+        return {}
+
+    df = raw.copy()
+    df["code"] = df["ts_code"].astype(str).str.extract(r"(\d{6})", expand=False).str.zfill(6)
+    # Tushare reports market cap in 万元; convert to 亿元 for display.
+    df["circ_mv"] = pd.to_numeric(df.get("circ_mv", 0), errors="coerce").fillna(0) / 10000
+    df = df[df["circ_mv"] > 0]
+
+    result: dict[str, float] = dict(zip(df["code"], df["circ_mv"]))
+    pd.DataFrame({"code": list(result.keys()), "circ_mv": list(result.values())}).to_csv(
+        cache_path, index=False
+    )
+    return result
+
+
 def _tushare_enabled() -> bool:
     return bool(os.getenv("TUSHARE_TOKEN") or os.getenv("TUSHARE_PRO_TOKEN"))

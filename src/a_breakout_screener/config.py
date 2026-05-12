@@ -20,6 +20,14 @@ class ScreenerConfig:
     min_price: float = 3.0
     allowed_prefixes: tuple[str, ...] = ("00", "30", "60", "68")
     exclude_name_keywords: tuple[str, ...] = ("ST", "*ST", "退")
+    market_regime: str = "all"
+    market_index: str = "000300"
+    confirmation_bars: int = 0
+    ma_trend_period: int = 0
+    max_open_gap_pct: float = 0.0
+    consolidation_weeks: int = 0
+    consolidation_max_span: float = 0.0
+    consolidation_penalty_weight: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -96,6 +104,14 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         min_price=float(screener_raw.get("min_price", 3.0)),
         allowed_prefixes=tuple(screener_raw.get("allowed_prefixes", ("00", "30", "60", "68"))),
         exclude_name_keywords=tuple(screener_raw.get("exclude_name_keywords", ("ST", "*ST", "退"))),
+        market_regime=str(screener_raw.get("market_regime", "all")),
+        market_index=str(screener_raw.get("market_index", "000300")),
+        confirmation_bars=int(screener_raw.get("confirmation_bars", 0)),
+        ma_trend_period=int(screener_raw.get("ma_trend_period", 0)),
+        max_open_gap_pct=float(screener_raw.get("max_open_gap_pct", 0.0)),
+        consolidation_weeks=int(screener_raw.get("consolidation_weeks", 0)),
+        consolidation_max_span=float(screener_raw.get("consolidation_max_span", 0.0)),
+        consolidation_penalty_weight=float(screener_raw.get("consolidation_penalty_weight", 0.0)),
     )
 
     network_raw = raw.get("network", {})

@@ -25,6 +25,18 @@ def test_evaluate_stock_rejects_overextended_breakout() -> None:
     assert candidate is None
 
 
+def test_evaluate_stock_rejects_when_trend_ma_has_insufficient_history() -> None:
+    history = _sample_history(latest_close=12.2, latest_volume=2_000_000)
+    candidate = evaluate_stock(
+        "000001",
+        "平安银行",
+        history,
+        ScreenerConfig(min_history_rows=120, ma_trend_period=300),
+    )
+
+    assert candidate is None
+
+
 def _sample_history(latest_close: float, latest_volume: int) -> pd.DataFrame:
     dates = pd.bdate_range("2025-01-01", periods=260)
     rows = []

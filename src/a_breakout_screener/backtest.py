@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +14,7 @@ import pandas as pd
 from .config import AppConfig
 from .data import _normalize_history
 from .models import Candidate
-from .scoring import evaluate_stock
+from .scoring import _to_weekly, _weekly_span_mean, assess_candidate, calc_resistance
 
 
 @dataclass(frozen=True)
@@ -23,6 +26,14 @@ class BacktestResult:
     signal_days: int
     stock_count: int
     trade_count: int
+
+
+@dataclass(frozen=True)
+class PreparedHistory:
+    code: str
+    name: str
+    history: pd.DataFrame
+    weekly: pd.DataFrame
 
 
 def run_backtest(
@@ -40,6 +51,10 @@ def run_backtest(
     trading_dates = _common_trading_dates(histories)
     if len(trading_dates) < config.screener.min_history_rows + max(holding_days) + 2:
         raise RuntimeError("历史数据太少，无法回测")
+    prepared_histories = {
+        code: _prepare_history(code, names.get(code, code), history, config.screener.ma_trend_period)
+        for code, history in histories.items()
+    }
 
     max_holding = max(holding_days)
     signal_dates = trading_dates[config.screener.min_history_rows : -max_holding - 1]
@@ -47,60 +62,46 @@ def run_backtest(
     max_top_n = max(top_ns)
 
     trades: list[dict[str, Any]] = []
+    filter_rows: list[dict[str, Any]] = []
     total = len(signal_dates)
-    for idx, signal_ts in enumerate(signal_dates, start=1):
-        daily_candidates: list[tuple[Candidate, pd.DataFrame, int]] = []
-        for code, history in histories.items():
-            pos = history["date"].searchsorted(signal_ts, side="right") - 1
-            if pos < config.screener.min_history_rows:
-                continue
-            if pos + max_holding + 1 >= len(history):
-                continue
-            past = history.iloc[: pos + 1]
-            latest = past.iloc[-1]
-            if float(latest.get("amount", 0) or 0) < config.screener.min_amount:
-                continue
-            if float(latest.get("close", 0) or 0) < config.screener.min_price:
-                continue
-            candidate = evaluate_stock(
-                code=code,
-                name=names.get(code, code),
-                history=past,
-                params=config.screener,
+    prepared_list = tuple(prepared_histories.values())
+    max_workers = max(1, config.screener.max_workers)
+    if max_workers == 1 or total <= 1:
+        for idx, signal_ts in enumerate(signal_dates, start=1):
+            day_trades, checked, passed = _backtest_signal_date(
+                signal_ts=signal_ts,
+                prepared_histories=prepared_list,
+                config=config,
+                holding_days=holding_days,
+                max_top_n=max_top_n,
+                max_holding=max_holding,
             )
-            if candidate:
-                daily_candidates.append((candidate, history, pos))
-
-        daily_candidates.sort(key=lambda item: item[0].score, reverse=True)
-        for rank, (candidate, history, pos) in enumerate(daily_candidates[:max_top_n], start=1):
-            entry_row = history.iloc[pos + 1]
-            entry_price = float(entry_row["open"])
-            if entry_price <= 0:
-                continue
-            for holding in holding_days:
-                exit_row = history.iloc[pos + holding]
-                exit_price = float(exit_row["close"])
-                ret = exit_price / entry_price - 1
-                trades.append(
-                    {
-                        "signal_date": signal_ts.date().isoformat(),
-                        "entry_date": pd.Timestamp(entry_row["date"]).date().isoformat(),
-                        "exit_date": pd.Timestamp(exit_row["date"]).date().isoformat(),
-                        "holding_days": holding,
-                        "rank": rank,
-                        "code": candidate.code,
-                        "name": candidate.name,
-                        "score": round(candidate.score, 4),
-                        "breakout_pct": round(candidate.breakout_pct * 100, 4),
-                        "volume_ratio": round(candidate.volume_ratio, 4),
-                        "entry_price": round(entry_price, 4),
-                        "exit_price": round(exit_price, 4),
-                        "return_pct": round(ret * 100, 4),
-                    }
-                )
-
-        if idx == 1 or idx % 20 == 0 or idx == total:
-            print(f"回测进度: {idx}/{total} 个信号日", flush=True)
+            trades.extend(day_trades)
+            filter_rows.append({"signal_date": signal_ts.date().isoformat(), "total_checked": checked, "passed": passed})
+            if idx == 1 or idx % 20 == 0 or idx == total:
+                print(f"回测进度: {idx}/{total} 个信号日", flush=True)
+    else:
+        completed: list[tuple[int, tuple[list[dict[str, Any]], int, int]]] = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    _backtest_signal_date,
+                    signal_ts=signal_ts,
+                    prepared_histories=prepared_list,
+                    config=config,
+                    holding_days=holding_days,
+                    max_top_n=max_top_n,
+                    max_holding=max_holding,
+                ): idx
+                for idx, signal_ts in enumerate(signal_dates, start=1)
+            }
+            for done_count, future in enumerate(as_completed(futures), start=1):
+                completed.append((futures[future], future.result()))
+                if done_count == 1 or done_count % 20 == 0 or done_count == total:
+                    print(f"回测进度: {done_count}/{total} 个信号日", flush=True)
+        for idx, (day_trades, checked, passed) in sorted(completed, key=lambda item: item[0]):
+            trades.extend(day_trades)
+            filter_rows.append({"signal_date": signal_dates[idx - 1].date().isoformat(), "total_checked": checked, "passed": passed})
 
     output_dir = config.paths.output_dir / "backtest" / date.today().isoformat()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -109,9 +110,11 @@ def run_backtest(
 
     trades_path = output_dir / "backtest_trades.csv"
     summary_path = output_dir / "backtest_summary.csv"
+    filters_path = output_dir / "backtest_filters.csv"
     html_path = output_dir / "backtest_report.html"
     trades_df.to_csv(trades_path, index=False, encoding="utf-8-sig")
     summary_df.to_csv(summary_path, index=False, encoding="utf-8-sig")
+    pd.DataFrame(filter_rows).to_csv(filters_path, index=False, encoding="utf-8-sig")
     html_path.write_text(_render_html(summary_df, trades_df, total, len(histories)), encoding="utf-8")
 
     return BacktestResult(
@@ -125,12 +128,212 @@ def run_backtest(
     )
 
 
+def _backtest_signal_date(
+    signal_ts: pd.Timestamp,
+    prepared_histories: tuple[PreparedHistory, ...],
+    config: AppConfig,
+    holding_days: tuple[int, ...],
+    max_top_n: int,
+    max_holding: int,
+) -> tuple[list[dict[str, Any]], int, int]:
+    total_checked = 0
+    daily_candidates: list[tuple[Candidate, pd.DataFrame, int]] = []
+    for prepared in prepared_histories:
+        history = prepared.history
+        pos = history["date"].searchsorted(signal_ts, side="right") - 1
+        if pos < config.screener.min_history_rows:
+            continue
+        if pos + max_holding + 1 >= len(history):
+            continue
+        latest = history.iloc[pos]
+        if _finite_float(latest.get("amount")) < config.screener.min_amount:
+            continue
+        if _finite_float(latest.get("close")) < config.screener.min_price:
+            continue
+        total_checked += 1
+        candidate = _evaluate_prepared_at_pos(prepared, pos, config)
+        if candidate:
+            daily_candidates.append((candidate, history, pos))
+
+    daily_candidates.sort(key=lambda item: item[0].score, reverse=True)
+    passed = len(daily_candidates)
+    trades: list[dict[str, Any]] = []
+    for rank, (candidate, history, pos) in enumerate(daily_candidates[:max_top_n], start=1):
+        entry_row = history.iloc[pos + 1]
+        entry_price = _finite_float(entry_row.get("open"))
+        if entry_price <= 0:
+            continue
+        for holding in holding_days:
+            exit_row = history.iloc[pos + holding]
+            exit_price = _finite_float(exit_row.get("close"))
+            if exit_price <= 0:
+                continue
+            ret = exit_price / entry_price - 1
+            trades.append(
+                {
+                    "signal_date": signal_ts.date().isoformat(),
+                    "entry_date": pd.Timestamp(entry_row["date"]).date().isoformat(),
+                    "exit_date": pd.Timestamp(exit_row["date"]).date().isoformat(),
+                    "holding_days": holding,
+                    "rank": rank,
+                    "code": candidate.code,
+                    "name": candidate.name,
+                    "score": round(candidate.score, 4),
+                    "breakout_pct": round(candidate.breakout_pct * 100, 4),
+                    "volume_ratio": round(candidate.volume_ratio, 4),
+                    "entry_price": round(entry_price, 4),
+                    "exit_price": round(exit_price, 4),
+                    "return_pct": round(ret * 100, 4),
+                }
+            )
+    return trades, total_checked, passed
+
+
+def _prepare_history(code: str, name: str, history: pd.DataFrame, ma_trend_period: int = 0) -> PreparedHistory:
+    prepared = history.sort_values("date").reset_index(drop=True).copy()
+    prepared["ma10"] = prepared["close"].rolling(10).mean()
+    prepared["ma20"] = prepared["close"].rolling(20).mean()
+
+    volume_baseline = prepared["volume"].shift(1).rolling(19).mean()
+    prepared["bt_volume_ratio"] = prepared["volume"] / volume_baseline
+    prepared["bt_volume_trend"] = prepared["volume"].rolling(5).mean() / volume_baseline
+
+    prev_close = prepared["close"].shift(1)
+    tr = pd.concat(
+        [
+            prepared["high"] - prepared["low"],
+            (prepared["high"] - prev_close).abs(),
+            (prepared["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    prepared["bt_atr_pct"] = tr.rolling(14).mean() / prepared["close"]
+    prepared["bt_monthly_span_pct"] = _monthly_span_series(prepared)
+
+    if ma_trend_period > 0:
+        prepared["ma_trend"] = prepared["close"].rolling(ma_trend_period).mean()
+    else:
+        prepared["ma_trend"] = float("nan")
+
+    weekly = _to_weekly(prepared)
+    return PreparedHistory(code=code, name=name, history=prepared, weekly=weekly)
+
+
+def _monthly_span_series(daily: pd.DataFrame, months: int = 12, trading_rows: int = 260) -> pd.Series:
+    dates = pd.to_datetime(daily["date"], errors="coerce")
+    periods = list(dates.dt.to_period("M"))
+    highs = pd.to_numeric(daily["high"], errors="coerce").to_numpy()
+    lows = pd.to_numeric(daily["low"], errors="coerce").to_numpy()
+    values: list[float] = []
+    high_indexes: deque[int] = deque()
+    low_indexes: deque[int] = deque()
+    left = 0
+
+    for idx, period in enumerate(periods):
+        min_period = period - (months - 1)
+        min_row = max(0, idx - trading_rows + 1)
+        while left < min_row or periods[left] < min_period:
+            left += 1
+        while high_indexes and high_indexes[0] < left:
+            high_indexes.popleft()
+        while low_indexes and low_indexes[0] < left:
+            low_indexes.popleft()
+
+        high = float(highs[idx])
+        low = float(lows[idx])
+        if math.isfinite(high):
+            while high_indexes and highs[high_indexes[-1]] <= high:
+                high_indexes.pop()
+            high_indexes.append(idx)
+        if math.isfinite(low):
+            while low_indexes and lows[low_indexes[-1]] >= low:
+                low_indexes.pop()
+            low_indexes.append(idx)
+
+        if not high_indexes or not low_indexes:
+            values.append(0.0)
+            continue
+        window_low = float(lows[low_indexes[0]])
+        if window_low <= 0:
+            values.append(0.0)
+        else:
+            values.append(float(highs[high_indexes[0]]) / window_low - 1)
+
+    return pd.Series(values, index=daily.index)
+
+
+def _evaluate_prepared_at_pos(prepared: PreparedHistory, pos: int, config: AppConfig) -> Candidate | None:
+    params = config.screener
+    history = prepared.history
+    latest = history.iloc[pos]
+    close = _finite_float(latest.get("close"))
+    open_ = _finite_float(latest.get("open"))
+    if close <= 0:
+        return None
+
+    resistance = calc_resistance(prepared.weekly, latest["date"], params.resistance_lookback_weeks)
+    if not resistance:
+        return None
+
+    breakout_pct = close / resistance.resistance - 1
+    ma10 = _finite_float(latest.get("ma10"))
+    ma20 = _finite_float(latest.get("ma20"))
+    ma_trend = _finite_float(latest.get("ma_trend"), float("nan"))
+    volume_ratio = _finite_float(latest.get("bt_volume_ratio"))
+    volume_trend = _finite_float(latest.get("bt_volume_trend"))
+    monthly_span_pct = _finite_float(latest.get("bt_monthly_span_pct"))
+    atr_pct = _finite_float(latest.get("bt_atr_pct"))
+    weekly_span_mean = _weekly_span_mean(prepared.weekly, params.consolidation_weeks, latest["date"]) if params.consolidation_weeks > 0 else 0.0
+
+    confirmation_closes: list[float] = []
+    if params.confirmation_bars > 0:
+        start = pos - params.confirmation_bars + 1
+        if start >= 0:
+            confirmation_closes = [float(c) for c in history["close"].iloc[start : pos + 1]]
+
+    return assess_candidate(
+        code=prepared.code,
+        name=prepared.name,
+        close=close,
+        open_=open_,
+        resistance=resistance.resistance,
+        resistance_touches=resistance.touches,
+        resistance_cluster_size=resistance.cluster_size,
+        breakout_pct=breakout_pct,
+        ma10=ma10,
+        ma20=ma20,
+        ma_trend=ma_trend,
+        volume_ratio=volume_ratio,
+        volume_trend=volume_trend,
+        monthly_span_pct=monthly_span_pct,
+        weekly_span_mean=weekly_span_mean,
+        atr_pct=atr_pct,
+        first_resistance_date=resistance.first_touch_date,
+        last_resistance_date=resistance.last_touch_date,
+        latest_trade_date=pd.Timestamp(latest["date"]).date(),
+        confirmation_closes=confirmation_closes,
+        params=params,
+    )
+
+
+def _finite_float(value: object, default: float = 0.0) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(result):
+        return default
+    return result
+
+
 def _load_histories(cache_dir: Path, symbols: set[str] | None = None) -> dict[str, pd.DataFrame]:
     hist_dir = cache_dir / "hist"
     normalized_symbols = {item.zfill(6) for item in symbols} if symbols else None
     histories: dict[str, pd.DataFrame] = {}
     for path in sorted(hist_dir.glob("*.csv")):
-        code = path.stem.zfill(6)
+        if not path.stem.isdigit() or len(path.stem) != 6:
+            continue
+        code = path.stem
         if normalized_symbols and code not in normalized_symbols:
             continue
         try:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import os
 import sys
 from pathlib import Path
@@ -52,6 +53,7 @@ def _build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--top-n", default="10,20,30", help="Comma separated TopN groups, default: 10,20,30")
     backtest.add_argument("--holding-days", default="5,10,20", help="Comma separated holding days, default: 5,10,20")
     backtest.add_argument("--symbols", default="", help="Comma separated stock codes for a focused backtest")
+    backtest.add_argument("--workers", type=int, default=0, help="Override backtest worker threads for this run")
     return parser
 
 
@@ -90,6 +92,8 @@ def _run(args: argparse.Namespace, config: AppConfig) -> int:
 
 
 def _backtest(args: argparse.Namespace, config: AppConfig) -> int:
+    if args.workers and args.workers > 0:
+        config = replace(config, screener=replace(config.screener, max_workers=args.workers))
     result = run_backtest(
         config=config,
         days=max(1, args.days),
