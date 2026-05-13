@@ -34,7 +34,7 @@ disable_system_proxy = true
 
 [email]
 enabled = false
-# smtp: use SMTP credentials; mail: use local /usr/bin/mail on the server.
+# smtp: use SMTP credentials; mail: use local /usr/bin/mail; codex_gmail: use server Codex Gmail plugin.
 method = "smtp"
 smtp_host = ""
 smtp_port = 465

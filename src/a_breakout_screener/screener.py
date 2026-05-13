@@ -193,16 +193,18 @@ def render_markdown_report(
 
     lines.extend(
         [
-            "|排名|代码|名称|收盘|市值(亿)|阻力|突破%|量能比|量趋势|触达|聚类|ATR%|得分|买入区|止损|提示|",
-            "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---|",
+            "|排名|类型|代码|名称|收盘|市值(亿)|阻力|突破%|量能比|量趋势|触达|聚类|ATR%|得分|买入区|交易止损|结构止损|总资产仓位|策略内仓位|最大亏损|提示|",
+            "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---|---|---|---|",
         ]
     )
     for idx, item in enumerate(candidates, start=1):
         lines.append(
-            "|{rank}|{code}|{name}|{close:.2f}|{mv}|{resistance:.2f}|{breakout:.2f}|"
+            "|{rank}|{signal_type}|{code}|{name}|{close:.2f}|{mv}|{resistance:.2f}|{breakout:.2f}|"
             "{vr:.2f}|{vt:.2f}|{touches}|{cluster}|{atr:.1f}|{score:.1f}|"
-            "{buy_low:.2f}-{buy_high:.2f}|{stop:.2f}|{hint}|".format(
+            "{buy_low:.2f}-{buy_high:.2f}|{trade_stop:.2f}|{structure_stop:.2f}|"
+            "{total_position}|{strategy_position}|{max_loss}|{hint}|".format(
                 rank=idx,
+                signal_type=item.signal_type,
                 code=item.code,
                 name=item.name,
                 close=item.latest_close,
@@ -217,7 +219,11 @@ def render_markdown_report(
                 score=item.score,
                 buy_low=item.buy_zone_low,
                 buy_high=item.buy_zone_high,
-                stop=item.stop_loss,
+                trade_stop=item.trade_stop_loss or item.stop_loss,
+                structure_stop=item.structure_stop_loss or item.stop_loss,
+                total_position=item.total_asset_position,
+                strategy_position=item.strategy_position,
+                max_loss=item.max_loss_asset_pct,
                 hint=item.position_hint,
             )
         )
@@ -314,9 +320,10 @@ def _write_blocked_result(output_dir: Path, reason: str, latest_trade_date: str)
         "说明: 大盘环境过滤已启用，当前不满足选股条件。\n",
         encoding="utf-8",
     )
-    cols = ["代码", "名称", "最新收盘", "阻力位", "突破幅度%", "量能比", "量能趋势", "阻力触达次数",
-            "阻力聚类大小", "月线跨度%", "ATR%", "MA10", "MA20", "得分", "首次阻力日期", "最近阻力日期",
-            "最新交易日", "建议买入区", "止损位", "仓位提示"]
+    cols = ["代码", "名称", "最新收盘", "信号类型", "信号说明", "阻力位", "突破幅度%", "量能比", "量能趋势",
+            "阻力触达次数", "阻力聚类大小", "月线跨度%", "ATR%", "MA10", "MA20", "得分", "首次阻力日期",
+            "最近阻力日期", "最新交易日", "建议买入区", "交易止损", "结构止损", "流通市值(亿)",
+            "总资产建议仓位", "策略内建议仓位", "最大允许亏损", "仓位提示"]
     pd.DataFrame(columns=cols).to_csv(csv_path, index=False, encoding="utf-8-sig")
     with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
         pd.DataFrame(columns=cols).to_excel(writer, index=False, sheet_name="突破候选")

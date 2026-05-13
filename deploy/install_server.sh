@@ -24,8 +24,8 @@ fi
 if [ ! -f "$APP_DIR/.env" ]; then
   cat > "$APP_DIR/.env" <<'EOF'
 A_BREAKOUT_EMAIL_ENABLED=true
-A_BREAKOUT_EMAIL_METHOD=mail
-MAIL_TO=zhangmc895@gmail.com
+A_BREAKOUT_EMAIL_METHOD=codex_gmail
+MAIL_TO=your-email@example.com
 EOF
   chmod 600 "$APP_DIR/.env"
 fi

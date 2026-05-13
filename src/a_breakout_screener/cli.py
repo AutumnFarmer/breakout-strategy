@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from .config import AppConfig, load_config
-from .emailer import send_report
+from .emailer import send_report, validate_email_transport
 from .backtest import run_backtest
 from .screener import run_scan
 
@@ -54,6 +54,10 @@ def _build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--holding-days", default="5,10,20", help="Comma separated holding days, default: 5,10,20")
     backtest.add_argument("--symbols", default="", help="Comma separated stock codes for a focused backtest")
     backtest.add_argument("--workers", type=int, default=0, help="Override backtest worker threads for this run")
+    backtest.add_argument("--long-hold-days", type=int, default=365, help="Long-hold lookback calendar days, default: 365")
+    backtest.add_argument("--long-hold-top-n", type=int, default=10, help="Daily TopN for long-hold backtest, default: 10")
+    backtest.add_argument("--capital-per-trade", type=float, default=1000.0, help="Capital per selected stock in long-hold backtest")
+    backtest.add_argument("--stop-loss-pct", type=float, default=50.0, help="Stop loss percent for long-hold backtest")
     return parser
 
 
@@ -100,10 +104,16 @@ def _backtest(args: argparse.Namespace, config: AppConfig) -> int:
         top_ns=_parse_int_tuple(args.top_n),
         holding_days=_parse_int_tuple(args.holding_days),
         symbols={item.strip() for item in args.symbols.split(",") if item.strip()} or None,
+        long_hold_days=max(1, args.long_hold_days),
+        long_hold_top_n=max(1, args.long_hold_top_n),
+        capital_per_trade=max(0.01, args.capital_per_trade),
+        stop_loss_pct=max(0.0, args.stop_loss_pct),
     )
     print(f"回测完成: {result.stock_count} 只股票，{result.signal_days} 个信号日，{result.trade_count} 笔模拟交易")
     print(f"交易明细: {result.trades_path}")
     print(f"汇总结果: {result.summary_path}")
+    print(f"长持交易: {result.long_hold_trades_path}")
+    print(f"长持汇总: {result.long_hold_summary_path}")
     print(f"可视化: {result.html_path}")
     return 0
 
@@ -127,9 +137,9 @@ def _doctor(config: AppConfig, skip_network: bool) -> int:
         spot = fetch_spot()
         print(f"A股行情列表: {len(spot)} 行")
     if config.email.enabled:
-        missing = config.email.missing_fields()
-        if missing:
-            print(f"邮件配置不完整: {', '.join(missing)}", file=sys.stderr)
+        problems = validate_email_transport(config.email)
+        if problems:
+            print(f"邮件配置不完整: {', '.join(problems)}", file=sys.stderr)
             return 1
         print("邮件配置: OK")
     else:

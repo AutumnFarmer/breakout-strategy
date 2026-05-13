@@ -30,7 +30,12 @@ def evaluate_stock(code: str, name: str, history: pd.DataFrame, params: Screener
         return None
 
     weekly = _to_weekly(daily)
-    resistance = calc_resistance(weekly, latest["date"], params.resistance_lookback_weeks)
+    resistance = calc_resistance(
+        weekly,
+        latest["date"],
+        params.resistance_lookback_weeks,
+        exclude_recent_weeks=params.resistance_exclude_recent_weeks,
+    )
     if resistance is None or resistance.resistance <= 0:
         return None
 
@@ -44,6 +49,7 @@ def evaluate_stock(code: str, name: str, history: pd.DataFrame, params: Screener
     monthly_span_pct = _monthly_span_pct(daily)
     weekly_span_mean = _weekly_span_mean(weekly, params.consolidation_weeks, latest["date"]) if params.consolidation_weeks > 0 else 0.0
     atr_pct = _calc_atr(daily)
+    recent_low = float(daily["low"].tail(20).min())
 
     return assess_candidate(
         code=code,
@@ -62,6 +68,7 @@ def evaluate_stock(code: str, name: str, history: pd.DataFrame, params: Screener
         monthly_span_pct=monthly_span_pct,
         weekly_span_mean=weekly_span_mean,
         atr_pct=atr_pct,
+        recent_low=recent_low,
         first_resistance_date=resistance.first_touch_date,
         last_resistance_date=resistance.last_touch_date,
         latest_trade_date=latest["date"].date(),
@@ -88,6 +95,7 @@ def assess_candidate(
     monthly_span_pct: float,
     weekly_span_mean: float,
     atr_pct: float,
+    recent_low: float,
     first_resistance_date: date | None,
     last_resistance_date: date | None,
     latest_trade_date: date,
@@ -131,8 +139,23 @@ def assess_candidate(
         return None
 
     buy_zone_low = resistance * 0.995
-    buy_zone_high = min(resistance * 1.025, close * 1.01)
-    stop_loss = min(resistance * 0.96, ma20 * 0.98)
+    buy_zone_high = resistance * 1.025
+    trade_stop_loss = resistance * 0.97
+    structure_stop_loss = _structure_stop_loss(
+        close=close,
+        resistance=resistance,
+        ma20=ma20,
+        atr_pct=atr_pct,
+        recent_low=recent_low,
+    )
+    signal_type, signal_reason = _classify_signal(
+        latest_trade_date=latest_trade_date,
+        close=close,
+        buy_zone_high=buy_zone_high,
+        breakout_pct=breakout_pct,
+        volume_ratio=volume_ratio,
+        params=params,
+    )
 
     return Candidate(
         code=code,
@@ -144,6 +167,8 @@ def assess_candidate(
         volume_trend=volume_trend,
         resistance_touches=resistance_touches,
         resistance_cluster_size=resistance_cluster_size,
+        signal_type=signal_type,
+        signal_reason=signal_reason,
         monthly_span_pct=monthly_span_pct,
         ma10=ma10,
         ma20=ma20,
@@ -154,8 +179,10 @@ def assess_candidate(
         latest_trade_date=latest_trade_date,
         buy_zone_low=buy_zone_low,
         buy_zone_high=buy_zone_high,
-        stop_loss=stop_loss,
-        position_hint=_position_hint(score, breakout_pct, volume_ratio, atr_pct),
+        stop_loss=trade_stop_loss,
+        trade_stop_loss=trade_stop_loss,
+        structure_stop_loss=structure_stop_loss,
+        position_hint=_position_hint(signal_type, signal_reason),
     )
 
 
@@ -163,6 +190,7 @@ def calc_resistance(
     weekly: pd.DataFrame,
     latest_trade_ts: pd.Timestamp,
     lookback_weeks: int,
+    exclude_recent_weeks: int = 4,
     touch_tolerance: float = 0.02,
     cluster_tolerance: float = 0.03,
     top_k: int = 8,
@@ -170,7 +198,8 @@ def calc_resistance(
     if len(weekly) < 20:
         return None
     latest_week_end = latest_trade_ts.to_period("W-FRI").end_time.normalize()
-    prior = weekly[weekly["week_end"] < latest_week_end].tail(lookback_weeks)
+    cutoff_week_end = latest_week_end - pd.Timedelta(weeks=max(0, exclude_recent_weeks))
+    prior = weekly[weekly["week_end"] < cutoff_week_end].tail(lookback_weeks)
     if len(prior) < 12:
         return None
 
@@ -313,20 +342,29 @@ def _weekly_span_mean(weekly: pd.DataFrame, weeks: int, latest_ts: pd.Timestamp)
 
 
 def _volume_ratio(daily: pd.DataFrame) -> float:
-    latest_volume = float(daily.iloc[-1].get("volume", 0) or 0)
-    baseline = float(daily["volume"].tail(20).iloc[:-1].mean())
+    activity = _activity_series(daily)
+    latest_volume = float(activity.iloc[-1])
+    baseline = float(activity.tail(20).iloc[:-1].mean())
     if baseline <= 0 or not np.isfinite(baseline):
         return 0.0
     return latest_volume / baseline
 
 
 def _volume_trend(daily: pd.DataFrame) -> float:
-    tail = daily["volume"].tail(20)
+    tail = _activity_series(daily).tail(20)
     short = float(tail.iloc[-5:].mean())
     long = float(tail.iloc[:-1].mean())
     if long <= 0 or not np.isfinite(long):
         return 0.0
     return short / long
+
+
+def _activity_series(daily: pd.DataFrame) -> pd.Series:
+    if "amount" in daily.columns:
+        amount = pd.to_numeric(daily["amount"], errors="coerce").fillna(0)
+        if float(amount.tail(20).sum()) > 0:
+            return amount
+    return pd.to_numeric(daily["volume"], errors="coerce").fillna(0)
 
 
 def _calc_atr(daily: pd.DataFrame, period: int = 14) -> float:
@@ -372,15 +410,55 @@ def _piecewise(x: float, points: list[tuple[float, float]]) -> float:
     return points[-1][1]
 
 
-def _position_hint(score: float, breakout_pct: float, volume_ratio: float, atr_pct: float) -> str:
-    size_suffix = ""
-    if atr_pct > 0:
-        # Suggested position = risk_pct (2%) / (ATR% * 2)
-        suggested = round(0.02 / (atr_pct * 2) * 100)
-        suggested = max(5, min(100, suggested))
-        size_suffix = f"，建议仓位约{suggested}%"
-    if score >= 75 and breakout_pct <= 0.05 and volume_ratio >= 1.2:
-        return f"强观察：可小仓试探{size_suffix}，等待回踩确认"
-    if score >= 60:
-        return f"观察：突破有效性待确认{size_suffix}"
-    return f"弱观察：只加入自选，不追高{size_suffix}"
+def _structure_stop_loss(
+    *,
+    close: float,
+    resistance: float,
+    ma20: float,
+    atr_pct: float,
+    recent_low: float,
+) -> float:
+    levels = [resistance * 0.96]
+    if np.isfinite(ma20) and ma20 > 0:
+        levels.append(ma20 * 0.98)
+    if np.isfinite(atr_pct) and atr_pct > 0:
+        levels.append(close * (1 - 2 * atr_pct))
+    if np.isfinite(recent_low) and recent_low > 0:
+        levels.append(recent_low)
+    valid = [level for level in levels if np.isfinite(level) and 0 < level < close]
+    if not valid:
+        return resistance * 0.96
+    return max(valid)
+
+
+def _classify_signal(
+    *,
+    latest_trade_date: date,
+    close: float,
+    buy_zone_high: float,
+    breakout_pct: float,
+    volume_ratio: float,
+    params: ScreenerConfig,
+) -> tuple[str, str]:
+    effective_breakout = params.effective_breakout_pct
+    strong_volume = params.strong_volume_ratio
+    if close > buy_zone_high:
+        return "C", "突破但已高于买入区，只观察不追，等待回踩"
+    if breakout_pct < effective_breakout:
+        return "D", f"突破幅度不足{effective_breakout * 100:.1f}%，排除买入"
+    if volume_ratio < strong_volume:
+        return "D", f"量能比不足{strong_volume:.1f}，排除买入"
+    if latest_trade_date.weekday() != 4:
+        return "B", "日线预警突破，等待周线收盘确认"
+    return "A", "周线确认突破，仍需等回踩不破后执行"
+
+
+def _position_hint(signal_type: str, signal_reason: str) -> str:
+    risk = "总资产0.5%-1%，策略内10%-20%，最大亏损控制在总资产0.2%-0.3%"
+    if signal_type == "A":
+        return f"A类：{signal_reason}；{risk}"
+    if signal_type == "B":
+        return f"B类：{signal_reason}；不直接追买，先小仓观察"
+    if signal_type == "C":
+        return f"C类：{signal_reason}"
+    return f"D类：{signal_reason}"

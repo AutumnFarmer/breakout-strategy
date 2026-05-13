@@ -16,6 +16,7 @@ fi
 
 cp "$LATEST_DIR/breakout_dashboard.html" "$SITE_DIR/index.html"
 cp "$LATEST_DIR/breakout_report.md" "$SITE_DIR/breakout_report.md" 2>/dev/null || true
+cp "$LATEST_DIR/ai_analysis.md" "$SITE_DIR/ai_analysis.md" 2>/dev/null || true
 cp "$LATEST_DIR/breakout_candidates.csv" "$SITE_DIR/breakout_candidates.csv" 2>/dev/null || true
 cp "$LATEST_DIR/breakout_candidates.xlsx" "$SITE_DIR/breakout_candidates.xlsx" 2>/dev/null || true
 basename "$LATEST_DIR" > "$SITE_DIR/latest_trade_date.txt"
@@ -26,6 +27,10 @@ if [ -n "$LATEST_BACKTEST" ] && [ -f "$LATEST_BACKTEST" ]; then
   cp "$BACKTEST_DIR/backtest_report.html" "$SITE_DIR/backtest.html"
   cp "$BACKTEST_DIR/backtest_summary.csv" "$SITE_DIR/backtest_summary.csv" 2>/dev/null || true
   cp "$BACKTEST_DIR/backtest_trades.csv" "$SITE_DIR/backtest_trades.csv" 2>/dev/null || true
+  cp "$BACKTEST_DIR/backtest_filters.csv" "$SITE_DIR/backtest_filters.csv" 2>/dev/null || true
+  cp "$BACKTEST_DIR/long_hold_summary.csv" "$SITE_DIR/long_hold_summary.csv" 2>/dev/null || true
+  cp "$BACKTEST_DIR/long_hold_trades.csv" "$SITE_DIR/long_hold_trades.csv" 2>/dev/null || true
+  cp "$BACKTEST_DIR/long_hold_filters.csv" "$SITE_DIR/long_hold_filters.csv" 2>/dev/null || true
 fi
 
 echo "Published $LATEST_DIR to $SITE_DIR"

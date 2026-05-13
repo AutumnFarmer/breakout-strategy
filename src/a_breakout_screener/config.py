@@ -13,9 +13,12 @@ class ScreenerConfig:
     max_workers: int = 6
     history_days: int = 900
     resistance_lookback_weeks: int = 52
+    resistance_exclude_recent_weeks: int = 4
     min_history_rows: int = 160
     breakout_buffer: float = 0.0
+    effective_breakout_pct: float = 0.02
     max_extension: float = 0.12
+    strong_volume_ratio: float = 1.8
     min_amount: float = 80_000_000
     min_price: float = 3.0
     allowed_prefixes: tuple[str, ...] = ("00", "30", "60", "68")
@@ -56,7 +59,7 @@ class EmailConfig:
     subject_prefix: str = "A股突破选股"
 
     def missing_fields(self) -> list[str]:
-        if self.method == "mail":
+        if self.method in {"mail", "codex_gmail", "gmail"}:
             return [] if self.mail_to else ["mail_to"]
         missing: list[str] = []
         for field_name in ("smtp_host", "smtp_user", "smtp_password", "mail_from"):
@@ -97,9 +100,12 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         max_workers=int(screener_raw.get("max_workers", 6)),
         history_days=int(screener_raw.get("history_days", 900)),
         resistance_lookback_weeks=int(screener_raw.get("resistance_lookback_weeks", 52)),
+        resistance_exclude_recent_weeks=int(screener_raw.get("resistance_exclude_recent_weeks", 4)),
         min_history_rows=int(screener_raw.get("min_history_rows", 160)),
         breakout_buffer=float(screener_raw.get("breakout_buffer", 0.0)),
+        effective_breakout_pct=float(screener_raw.get("effective_breakout_pct", 0.02)),
         max_extension=float(screener_raw.get("max_extension", 0.12)),
+        strong_volume_ratio=float(screener_raw.get("strong_volume_ratio", 1.8)),
         min_amount=float(screener_raw.get("min_amount", 80_000_000)),
         min_price=float(screener_raw.get("min_price", 3.0)),
         allowed_prefixes=tuple(screener_raw.get("allowed_prefixes", ("00", "30", "60", "68"))),

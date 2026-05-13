@@ -33,15 +33,17 @@ EOF
 
 不要把 `.env` 提交到 Git；这里面是邮箱授权码。
 
-服务器上也支持免 SMTP 的本地 `mail` 模式:
+服务器上推荐使用 Codex Gmail 插件模式:
 
 ```bash
 cat > .env <<'EOF'
 A_BREAKOUT_EMAIL_ENABLED=true
-A_BREAKOUT_EMAIL_METHOD=mail
-MAIL_TO=zhangmc895@gmail.com
+A_BREAKOUT_EMAIL_METHOD=codex_gmail
+MAIL_TO=your-email@example.com
 EOF
 ```
+
+该模式要求服务器上的 Codex 已登录，并且 Gmail 插件连接器可用；发送时会调用 `codex exec --dangerously-bypass-approvals-and-sandbox`。
 
 ## 服务器部署
 
@@ -52,7 +54,7 @@ cp config.example.toml config.toml
 bash deploy/deploy.sh
 ```
 
-部署脚本会在服务器上自动生成一个本地 `mail` 模式的 `.env`。如需改成 SMTP，再到服务器补充真实 `.env`:
+部署脚本会在服务器上自动生成一个 `codex_gmail` 模式的 `.env`。如需改成 SMTP，再到服务器补充真实 `.env`:
 
 ```bash
 ssh aiwork-server
