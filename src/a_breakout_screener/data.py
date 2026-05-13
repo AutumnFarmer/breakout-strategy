@@ -168,15 +168,22 @@ def fetch_history(
     cache_path.parent.mkdir(parents=True, exist_ok=True)
 
     cached = _read_history_cache(cache_path)
-    fetch_start = start_date
-    if not force_refresh and not cached.empty:
-        latest_cached = cached["date"].max().date()
-        if latest_cached >= end_date:
-            return _slice_history(cached, start_date, end_date)
-        fetch_start = max(start_date, latest_cached - timedelta(days=14))
+    fresh_frames: list[pd.DataFrame] = []
 
     try:
-        fresh = _fetch_history_from_source(symbol, fetch_start, end_date)
+        if not force_refresh and not cached.empty:
+            earliest_cached = cached["date"].min().date()
+            latest_cached = cached["date"].max().date()
+            if earliest_cached <= start_date and latest_cached >= end_date:
+                return _slice_history(cached, start_date, end_date)
+            if earliest_cached > start_date:
+                fetch_end = min(end_date, earliest_cached + timedelta(days=14))
+                fresh_frames.append(_fetch_history_from_source(symbol, start_date, fetch_end))
+            if latest_cached < end_date:
+                fetch_start = max(start_date, latest_cached - timedelta(days=14))
+                fresh_frames.append(_fetch_history_from_source(symbol, fetch_start, end_date))
+        if force_refresh or cached.empty:
+            fresh_frames.append(_fetch_history_from_source(symbol, start_date, end_date))
     except Exception as exc:  # pragma: no cover - network/data-source fallback path
         if not cached.empty and _cache_is_fresh(cached, end_date):
             warnings.warn(f"{symbol} history fetch failed; using cached data: {exc}", RuntimeWarning)
@@ -189,10 +196,11 @@ def fetch_history(
             ) from exc
         raise
 
-    if cached.empty:
-        merged = fresh
+    frames = ([] if force_refresh else [cached]) + fresh_frames
+    if not frames:
+        merged = cached
     else:
-        merged = pd.concat([cached, fresh], ignore_index=True)
+        merged = pd.concat(frames, ignore_index=True)
         merged = merged.drop_duplicates(subset=["date"], keep="last")
         merged = merged.sort_values("date").reset_index(drop=True)
 
@@ -215,12 +223,21 @@ def prepare_history_cache(
     for symbol in normalized_symbols:
         cache_path = cache_dir / "hist" / f"{symbol}.csv"
         cached = pd.DataFrame() if force_refresh else _read_history_cache(cache_path)
-        if not cached.empty and cached["date"].max().date() >= end_date:
+        if (
+            not cached.empty
+            and cached["date"].min().date() <= start_date
+            and cached["date"].max().date() >= end_date
+        ):
             continue
         if cached.empty:
             needs[symbol] = start_date
         else:
-            needs[symbol] = max(start_date, cached["date"].max().date() - timedelta(days=14))
+            earliest_cached = cached["date"].min().date()
+            latest_cached = cached["date"].max().date()
+            if earliest_cached > start_date:
+                needs[symbol] = start_date
+            elif latest_cached < end_date:
+                needs[symbol] = max(start_date, latest_cached - timedelta(days=14))
 
     if not needs:
         return 0, 0

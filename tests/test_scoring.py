@@ -7,13 +7,17 @@ from a_breakout_screener.scoring import evaluate_stock
 
 
 def test_evaluate_stock_accepts_fresh_weekly_breakout() -> None:
-    history = _sample_history(latest_close=12.2, latest_volume=2_000_000)
+    history = _sample_history(latest_close=12.5, latest_volume=2_000_000)
     candidate = evaluate_stock("000001", "平安银行", history, ScreenerConfig(min_history_rows=120))
 
     assert candidate is not None
     assert candidate.code == "000001"
-    assert candidate.resistance >= 11.5
+    assert candidate.zone_low < candidate.zone_mid < candidate.zone_upper
+    assert candidate.resistance == candidate.zone_upper
+    assert candidate.resistance_touches >= 3
+    assert candidate.span_weeks >= 20
     assert 0 <= candidate.breakout_pct <= 0.12
+    assert candidate.signal_type in {"A", "B"}
     assert candidate.volume_ratio > 1
     assert candidate.score > 50
 
@@ -31,20 +35,20 @@ def test_evaluate_stock_rejects_when_trend_ma_has_insufficient_history() -> None
         "000001",
         "平安银行",
         history,
-        ScreenerConfig(min_history_rows=120, ma_trend_period=300),
+        ScreenerConfig(min_history_rows=120, ma_trend_period=900),
     )
 
     assert candidate is None
 
 
 def _sample_history(latest_close: float, latest_volume: int) -> pd.DataFrame:
-    dates = pd.bdate_range("2025-01-01", periods=260)
+    dates = pd.bdate_range("2023-01-02", periods=820)
     rows = []
     for idx, trade_date in enumerate(dates):
-        close = 9.5 + idx * 0.006
-        high = close + 0.18
+        close = 8.8 + idx * 0.002
+        high = close + 0.16
         low = close - 0.18
-        if 90 <= idx <= 170 and idx % 20 == 0:
+        if idx in {120, 245, 370, 520}:
             high = 11.8
             close = 11.55
             low = 11.1

@@ -46,8 +46,14 @@ def _candidate_payload(rank: int, item: Candidate) -> dict[str, Any]:
         "rank": rank,
         "code": item.code,
         "name": item.name,
+        "signalType": item.signal_type,
+        "signalReason": item.signal_reason,
         "latestClose": round(item.latest_close, 4),
         "resistance": round(item.resistance, 4),
+        "zoneLow": round(item.zone_low or item.resistance, 4),
+        "zoneMid": round(item.zone_mid or item.resistance, 4),
+        "zoneUpper": round(item.zone_upper or item.resistance, 4),
+        "spanWeeks": item.span_weeks,
         "breakoutPct": round(item.breakout_pct * 100, 4),
         "volumeRatio": round(item.volume_ratio, 4),
         "volumeTrend": round(item.volume_trend, 4),
@@ -66,6 +72,9 @@ def _candidate_payload(rank: int, item: Candidate) -> dict[str, Any]:
         "buyLow": round(item.buy_zone_low, 4),
         "buyHigh": round(item.buy_zone_high, 4),
         "stopLoss": round(item.stop_loss, 4),
+        "tradeStopLoss": round(item.trade_stop_loss or item.stop_loss, 4),
+        "structureStopLoss": round(item.structure_stop_loss or item.stop_loss, 4),
+        "tradeAction": item.trade_action,
         "hint": item.position_hint,
         "tags": list(item.tags),
         "latestTradeDate": item.latest_trade_date.isoformat(),
@@ -470,10 +479,11 @@ HTML_TEMPLATE = """<!doctype html>
           <thead>
             <tr>
               <th>排名</th>
+              <th>类型</th>
               <th class="name">股票</th>
               <th>收盘</th>
               <th>市值(亿)</th>
-              <th>阻力</th>
+              <th>压力上沿</th>
               <th>突破</th>
               <th>量比</th>
               <th>量趋势</th>
@@ -511,6 +521,10 @@ HTML_TEMPLATE = """<!doctype html>
         <div class="chart-help">拖拽平移，滚轮缩放，移动鼠标查看十字光标和 OHLC。</div>
       </div>
       <div class="detail-grid">
+        <div class="detail"><span>信号类型</span><strong id="signalType"></strong></div>
+        <div class="detail"><span>交易结论</span><strong id="tradeAction"></strong></div>
+        <div class="detail"><span>压力区</span><strong id="pressureZone"></strong></div>
+        <div class="detail"><span>压力跨度</span><strong id="spanWeeks"></strong></div>
         <div class="detail"><span>买入区</span><strong id="buyZone"></strong></div>
         <div class="detail"><span>止损位</span><strong id="stopLoss"></strong></div>
         <div class="detail"><span>阻力触达</span><strong id="touches"></strong></div>
@@ -650,7 +664,7 @@ HTML_TEMPLATE = """<!doctype html>
       if (!rows.length) {
         const row = document.createElement("tr");
         const cell = document.createElement("td");
-        cell.colSpan = 12;
+        cell.colSpan = 13;
         cell.className = "empty";
         cell.textContent = DASHBOARD.candidates.length ? "当前标签下没有候选。" : "今日没有符合条件的候选。";
         row.appendChild(cell);
@@ -663,10 +677,11 @@ HTML_TEMPLATE = """<!doctype html>
         if (item.code === state.code) row.classList.add("selected");
         const cells = [
           item.rank,
+          item.signalType || "-",
           `${item.code} ${item.name}`,
           fmt(item.latestClose),
           item.circMv > 0 ? fmt(item.circMv, 1) : "-",
-          fmt(item.resistance),
+          fmt(item.zoneUpper || item.resistance),
           `${fmt(item.breakoutPct)}%`,
           fmt(item.volumeRatio),
           fmt(item.volumeTrend),
@@ -677,7 +692,7 @@ HTML_TEMPLATE = """<!doctype html>
         ];
         cells.forEach((value, idx) => {
           const cell = document.createElement("td");
-          if (idx === 11) {
+          if (idx === 12) {
             cell.className = "name";
             const tags = document.createElement("div");
             tags.className = "tags";
@@ -695,10 +710,11 @@ HTML_TEMPLATE = """<!doctype html>
           } else {
             cell.textContent = value;
           }
-          if (idx === 1) cell.className = "name";
-          if (idx === 5 && item.breakoutPct > 0) cell.classList.add("strong");
-          if (idx === 9) cell.classList.add("score");
-          if (idx === 10) cell.classList.add("growth");
+          if (idx === 1 && item.signalType === "A") cell.classList.add("strong");
+          if (idx === 2) cell.className = "name";
+          if (idx === 6 && item.breakoutPct > 0) cell.classList.add("strong");
+          if (idx === 10) cell.classList.add("score");
+          if (idx === 11) cell.classList.add("growth");
           row.appendChild(cell);
         });
         row.addEventListener("click", () => {
@@ -778,6 +794,7 @@ HTML_TEMPLATE = """<!doctype html>
         document.getElementById("chartName").textContent = "历史K线";
         document.getElementById("chartMeta").textContent = "";
         [
+          "signalType", "tradeAction", "pressureZone", "spanWeeks",
           "buyZone", "stopLoss", "touches", "cluster", "atr", "hoverInfo",
           "financialDate", "growthScore", "revenueYoy", "profitYoy", "roe", "tagDetail"
         ].forEach(id => {
@@ -791,9 +808,13 @@ HTML_TEMPLATE = """<!doctype html>
 
       document.getElementById("chartName").textContent = `${item.code} ${item.name}`;
       document.getElementById("chartMeta").textContent =
-        `收盘 ${fmt(item.latestClose)} / 市值 ${item.circMv > 0 ? fmt(item.circMv, 1) + '亿' : '-'} / 阻力 ${fmt(item.resistance)} / 突破 ${fmt(item.breakoutPct)}% / 技术 ${fmt(item.score, 1)} / 成长 ${item.growthScore > 0 ? fmt(item.growthScore, 1) : '-'} / ${item.hint}`;
+        `${item.signalType || "-"}类 / 收盘 ${fmt(item.latestClose)} / 市值 ${item.circMv > 0 ? fmt(item.circMv, 1) + '亿' : '-'} / 压力上沿 ${fmt(item.zoneUpper || item.resistance)} / 突破 ${fmt(item.breakoutPct)}% / 技术 ${fmt(item.score, 1)} / 成长 ${item.growthScore > 0 ? fmt(item.growthScore, 1) : '-'} / ${item.hint}`;
+      document.getElementById("signalType").textContent = `${item.signalType || "-"} ${item.signalReason || ""}`.trim();
+      document.getElementById("tradeAction").textContent = item.tradeAction || "-";
+      document.getElementById("pressureZone").textContent = `${fmt(item.zoneLow || item.resistance)} - ${fmt(item.zoneUpper || item.resistance)}`;
+      document.getElementById("spanWeeks").textContent = item.spanWeeks ? `${item.spanWeeks} 周` : "-";
       document.getElementById("buyZone").textContent = `${fmt(item.buyLow)} - ${fmt(item.buyHigh)}`;
-      document.getElementById("stopLoss").textContent = fmt(item.stopLoss);
+      document.getElementById("stopLoss").textContent = `${fmt(item.tradeStopLoss || item.stopLoss)} / 结构 ${fmt(item.structureStopLoss || item.stopLoss)}`;
       document.getElementById("touches").textContent = `${item.touches} 次`;
       document.getElementById("cluster").textContent = `${item.clusterSize || "-"} 根K线`;
       document.getElementById("atr").textContent = `${fmt(item.atrPct)}%`;
@@ -819,8 +840,8 @@ HTML_TEMPLATE = """<!doctype html>
       const volumeBottom = height - 26;
       const highs = data.map(row => row.high);
       const lows = data.map(row => row.low);
-      highs.push(item.resistance, item.buyHigh, item.stopLoss);
-      lows.push(item.resistance, item.buyLow, item.stopLoss);
+      highs.push(item.zoneUpper || item.resistance, item.zoneMid || item.resistance, item.buyHigh, item.stopLoss);
+      lows.push(item.zoneLow || item.resistance, item.zoneMid || item.resistance, item.buyLow, item.stopLoss);
       let maxPrice = Math.max(...highs);
       let minPrice = Math.min(...lows);
       const pad = Math.max((maxPrice - minPrice) * 0.08, maxPrice * 0.01, 0.5);
@@ -864,7 +885,12 @@ HTML_TEMPLATE = """<!doctype html>
       const buyY2 = yScale(item.buyLow, minPrice, maxPrice, top, priceBottom);
       ctx.fillStyle = "rgba(31, 111, 235, 0.08)";
       ctx.fillRect(left, Math.min(buyY1, buyY2), right - left, Math.abs(buyY2 - buyY1));
-      drawLine(yScale(item.resistance, minPrice, maxPrice, top, priceBottom), "#1f6feb", "阻力");
+      const zoneLowY = yScale(item.zoneLow || item.resistance, minPrice, maxPrice, top, priceBottom);
+      const zoneUpperY = yScale(item.zoneUpper || item.resistance, minPrice, maxPrice, top, priceBottom);
+      ctx.fillStyle = "rgba(183, 110, 0, 0.09)";
+      ctx.fillRect(left, Math.min(zoneLowY, zoneUpperY), right - left, Math.abs(zoneUpperY - zoneLowY));
+      drawLine(yScale(item.zoneUpper || item.resistance, minPrice, maxPrice, top, priceBottom), "#1f6feb", "压力上沿");
+      drawLine(yScale(item.zoneMid || item.resistance, minPrice, maxPrice, top, priceBottom), "#667085", "压力中枢");
       drawLine(yScale(item.stopLoss, minPrice, maxPrice, top, priceBottom), "#b76e00", "止损");
 
       data.forEach((row, idx) => {

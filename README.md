@@ -1,6 +1,6 @@
 # A股突破选股自动化系统
 
-每天拉取 A 股行情，筛选“突破周线阻力位但未明显追高”的股票，生成 CSV/Excel/Markdown/HTML 可视化复核页，并通过邮件提醒。
+每天拉取 A 股行情，筛选“突破 156 周压力区但未明显追高”的股票，生成 CSV/Excel/Markdown/HTML 可视化复核页，并通过邮件提醒。
 
 ## 本地运行
 
@@ -11,7 +11,7 @@ uv run a-breakout --config config.toml doctor
 uv run a-breakout --config config.toml run --no-email --symbols 000001,600519,300750
 ```
 
-运行后可打开输出目录里的 `breakout_dashboard.html`。网页支持候选股列表、题材 tag 筛选、交互式 K 线缩放/平移、阻力位、买入区、止损线和 AI 选股分析员复核。
+运行后可打开输出目录里的 `breakout_dashboard.html`。网页支持候选股列表、A/B/C/D 信号类型、题材 tag 筛选、交互式 K 线缩放/平移、压力区、买入区、止损线和 AI 选股分析员复核。
 
 配置邮件后运行:
 

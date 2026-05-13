@@ -116,7 +116,7 @@ def run_scan(
             except Exception as exc:  # pragma: no cover - external data source failures vary
                 failures.append((code, name, str(exc)))
 
-    candidates = sorted(candidates, key=lambda item: item.score, reverse=True)[: config.screener.top_n]
+    candidates = _sort_candidates(candidates)[: config.screener.top_n]
     circ_mv_map: dict[str, float] = {}
     if candidates:
         trade_date_str = candidates[0].latest_trade_date.strftime("%Y%m%d")
@@ -212,7 +212,12 @@ def render_markdown_report(
         "",
         f"- 扫描股票数: {scanned_count}",
         f"- 数据失败数: {failed_count}",
-        f"- 入选数量: {len(candidates)}",
+        f"- 候选总数: {len(candidates)}",
+        f"- A类周线确认: {sum(1 for item in candidates if item.signal_type == 'A')}",
+        f"- B类日线预警: {sum(1 for item in candidates if item.signal_type == 'B')}",
+        f"- C类突破不追: {sum(1 for item in candidates if item.signal_type == 'C')}",
+        f"- D类突破不足: {sum(1 for item in candidates if item.signal_type == 'D')}",
+        f"- 今日可交易观察: {sum(1 for item in candidates if item.signal_type == 'A')}",
         "",
         "说明: 这是规则筛选和风险观察清单，不是投资建议。请结合大盘环境、行业事件和个人仓位做二次判断。",
         "",
@@ -223,27 +228,29 @@ def render_markdown_report(
 
     lines.extend(
         [
-            "|排名|代码|名称|标签|收盘|市值(亿)|阻力|突破%|量能比|量趋势|触达|聚类|ATR%|技术分|成长分|营收同比%|净利同比%|ROE%|买入区|止损|提示|",
-            "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---|",
+            "|排名|类型|代码|名称|标签|收盘|市值(亿)|压力区|突破%|量能比|量趋势|触达|跨度周|ATR%|技术分|成长分|营收同比%|净利同比%|ROE%|买入区|交易止损|结论|",
+            "|---:|---|---|---|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---|",
         ]
     )
     for idx, item in enumerate(candidates, start=1):
         lines.append(
-            "|{rank}|{code}|{name}|{tags}|{close:.2f}|{mv}|{resistance:.2f}|{breakout:.2f}|"
-            "{vr:.2f}|{vt:.2f}|{touches}|{cluster}|{atr:.1f}|{score:.1f}|{growth}|{revenue}|{profit}|{roe}|"
-            "{buy_low:.2f}-{buy_high:.2f}|{stop:.2f}|{hint}|".format(
+            "|{rank}|{signal}|{code}|{name}|{tags}|{close:.2f}|{mv}|{zone_low:.2f}-{zone_upper:.2f}|{breakout:.2f}|"
+            "{vr:.2f}|{vt:.2f}|{touches}|{span}|{atr:.1f}|{score:.1f}|{growth}|{revenue}|{profit}|{roe}|"
+            "{buy_low:.2f}-{buy_high:.2f}|{stop:.2f}|{action}|".format(
                 rank=idx,
+                signal=item.signal_type,
                 code=item.code,
                 name=item.name,
                 tags="、".join(item.tags) if item.tags else "-",
                 close=item.latest_close,
                 mv=f"{item.circ_mv:.1f}" if item.circ_mv > 0 else "-",
-                resistance=item.resistance,
+                zone_low=item.zone_low or item.resistance,
+                zone_upper=item.zone_upper or item.resistance,
                 breakout=item.breakout_pct * 100,
                 vr=item.volume_ratio,
                 vt=item.volume_trend,
                 touches=item.resistance_touches,
-                cluster=item.resistance_cluster_size,
+                span=item.span_weeks,
                 atr=item.atr_pct * 100,
                 score=item.score,
                 growth=f"{item.growth_score:.1f}" if item.growth_score > 0 else "-",
@@ -252,8 +259,8 @@ def render_markdown_report(
                 roe=_fmt_optional(item.roe),
                 buy_low=item.buy_zone_low,
                 buy_high=item.buy_zone_high,
-                stop=item.stop_loss,
-                hint=item.position_hint,
+                stop=item.trade_stop_loss or item.stop_loss,
+                action=item.trade_action or item.position_hint,
             )
         )
     lines.append("")
@@ -308,6 +315,19 @@ def _fetch_financials_for_candidates(
 
 def _fmt_optional(value: float | None) -> str:
     return f"{value:.1f}" if value is not None else "-"
+
+
+def _sort_candidates(candidates: list[Candidate]) -> list[Candidate]:
+    signal_order = {"A": 0, "B": 1, "C": 2, "D": 3}
+    return sorted(
+        candidates,
+        key=lambda item: (
+            signal_order.get(item.signal_type, 9),
+            -item.score,
+            -item.volume_ratio,
+            item.code,
+        ),
+    )
 
 
 def _check_one(
@@ -399,9 +419,11 @@ def _write_blocked_result(output_dir: Path, reason: str, latest_trade_date: str)
         "说明: 大盘环境过滤已启用，当前不满足选股条件。\n",
         encoding="utf-8",
     )
-    cols = ["代码", "名称", "最新收盘", "阻力位", "突破幅度%", "量能比", "量能趋势", "阻力触达次数",
-            "阻力聚类大小", "月线跨度%", "ATR%", "MA10", "MA20", "得分", "首次阻力日期", "最近阻力日期",
-            "最新交易日", "建议买入区", "止损位", "流通市值(亿)", "仓位提示", "题材标签",
+    cols = ["代码", "名称", "信号类型", "信号说明", "最新收盘", "压力区下沿", "压力区中枢", "压力区上沿",
+            "阻力位", "突破幅度%", "量能比", "量能趋势", "阻力触达次数", "阻力聚类大小", "压力跨度周",
+            "月线跨度%", "ATR%", "MA10", "MA20", "得分", "首次阻力日期", "最近阻力日期",
+            "最新交易日", "建议买入区", "止损位", "交易止损", "结构止损", "流通市值(亿)",
+            "总资产建议仓位", "策略内建议仓位", "最大允许亏损", "交易结论", "仓位提示", "题材标签",
             "财务期", "成长分", "营收同比%", "净利同比%", "ROE%", "毛利率%", "资产负债率%"]
     pd.DataFrame(columns=cols).to_csv(csv_path, index=False, encoding="utf-8-sig")
     with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:

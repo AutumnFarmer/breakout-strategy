@@ -15,6 +15,12 @@ class Candidate:
     volume_trend: float = 0.0
     resistance_touches: int = 0
     resistance_cluster_size: int = 0
+    signal_type: str = "D"
+    signal_reason: str = ""
+    zone_low: float = 0.0
+    zone_mid: float = 0.0
+    zone_upper: float = 0.0
+    span_weeks: int = 0
     monthly_span_pct: float = 0.0
     ma10: float = 0.0
     ma20: float = 0.0
@@ -26,7 +32,13 @@ class Candidate:
     buy_zone_low: float = 0.0
     buy_zone_high: float = 0.0
     stop_loss: float = 0.0
+    trade_stop_loss: float = 0.0
+    structure_stop_loss: float = 0.0
     circ_mv: float = 0.0
+    total_asset_position: str = "0.5%-1%"
+    strategy_position: str = "10%-20%"
+    max_loss_asset_pct: str = "0.2%-0.3%"
+    trade_action: str = ""
     position_hint: str = ""
     tags: tuple[str, ...] = field(default_factory=tuple)
     financial_end_date: str = ""
@@ -41,13 +53,19 @@ class Candidate:
         data = {
             "代码": self.code,
             "名称": self.name,
+            "信号类型": self.signal_type,
+            "信号说明": self.signal_reason,
             "最新收盘": round(self.latest_close, 2),
+            "压力区下沿": round(self.zone_low or self.resistance, 2),
+            "压力区中枢": round(self.zone_mid or self.resistance, 2),
+            "压力区上沿": round(self.zone_upper or self.resistance, 2),
             "阻力位": round(self.resistance, 2),
             "突破幅度%": round(self.breakout_pct * 100, 2),
             "量能比": round(self.volume_ratio, 2),
             "量能趋势": round(self.volume_trend, 2),
             "阻力触达次数": self.resistance_touches,
             "阻力聚类大小": self.resistance_cluster_size,
+            "压力跨度周": self.span_weeks,
             "月线跨度%": round(self.monthly_span_pct * 100, 2),
             "ATR%": round(self.atr_pct * 100, 2),
             "MA10": round(self.ma10, 2),
@@ -58,7 +76,13 @@ class Candidate:
             "最新交易日": self.latest_trade_date.isoformat(),
             "建议买入区": f"{self.buy_zone_low:.2f}-{self.buy_zone_high:.2f}",
             "止损位": round(self.stop_loss, 2),
+            "交易止损": round(self.trade_stop_loss or self.stop_loss, 2),
+            "结构止损": round(self.structure_stop_loss or self.stop_loss, 2),
             "流通市值(亿)": round(self.circ_mv, 2) if self.circ_mv > 0 else "",
+            "总资产建议仓位": self.total_asset_position,
+            "策略内建议仓位": self.strategy_position,
+            "最大允许亏损": self.max_loss_asset_pct,
+            "交易结论": self.trade_action,
             "仓位提示": self.position_hint,
             "题材标签": " / ".join(self.tags),
             "财务期": self.financial_end_date,

@@ -1,12 +1,22 @@
 [screener]
-top_n = 30
+top_n = 20
 max_workers = 6
-history_days = 900
-resistance_lookback_weeks = 52
-min_history_rows = 160
+history_days = 1300
+resistance_lookback_weeks = 156
+resistance_exclude_recent_weeks = 4
+min_history_rows = 520
+pivot_k = 3
+cluster_tolerance = 0.03
+touch_tolerance = 0.02
+min_touches = 3
+min_touch_gap_weeks = 4
+min_span_weeks = 20
 breakout_buffer = 0.0
+effective_breakout_pct = 0.02
+max_buy_extension = 0.08
 max_extension = 0.12
-min_amount = 80000000
+strong_volume_ratio = 1.8
+min_amount = 100000000
 min_price = 3.0
 allowed_prefixes = ["00", "30", "60", "68"]
 exclude_name_keywords = ["ST", "*ST", "退"]

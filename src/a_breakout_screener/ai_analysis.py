@@ -54,14 +54,15 @@ def _build_prompt(
         "你是一个A股突破策略的AI选股分析员。请基于给定的程序筛选结果做复核分析，"
         "输出中文 Markdown。\n\n"
         "分析要求：\n"
-        "1. 结合候选股的行业/题材tag聚类，判断当前结果更偏向哪些市场热点或主线。\n"
-        "2. 从宏观环境角度讨论可能影响这些主线的因素，例如政策、流动性、汇率、出口、地产、"
+        "1. 先区分 A/B/C/D 信号类型：A 可交易观察，B 日线预警，C 不追，D 突破不足。\n"
+        "2. 结合候选股的行业/题材tag聚类，判断当前结果更偏向哪些市场热点或主线。\n"
+        "3. 从宏观环境角度讨论可能影响这些主线的因素，例如政策、流动性、汇率、出口、地产、"
         "利率、业绩兑现和风险偏好；不要编造具体未提供的新闻事实。\n"
-        "3. 评估未来是否有预期：只能用“需要验证/值得跟踪/风险较高”等审慎表述，不能承诺收益。\n"
-        "4. 结合成长分、营收同比、净利同比、ROE 等财务指标，区分“技术突破强但成长证据弱”和“量价与成长性共振”的候选。\n"
-        "5. 挑 5-8 只最需要复核的候选，说明关注理由、需要确认的催化/业绩/成交信号和主要风险。\n"
-        "6. 最后给出“明日/下次扫描观察清单”：需要关注的tag、量价确认、成长指标反证、止损纪律。\n"
-        "7. 这是研究辅助，不是投资建议；不得使用确定性买卖指令。\n\n"
+        "4. 评估未来是否有预期：只能用“需要验证/值得跟踪/风险较高”等审慎表述，不能承诺收益。\n"
+        "5. 结合成长分、营收同比、净利同比、ROE 等财务指标，区分“技术突破强但成长证据弱”和“量价与成长性共振”的候选。\n"
+        "6. 挑 5-8 只最需要复核的候选，说明关注理由、需要确认的催化/业绩/成交信号和主要风险。\n"
+        "7. 最后给出“明日/下次扫描观察清单”：需要关注的tag、量价确认、成长指标反证、止损纪律。\n"
+        "8. 这是研究辅助，不是投资建议；不得使用确定性买卖指令。\n\n"
         "请控制在 1200-1800 中文字以内，不要输出大表格。\n\n"
         "输出结构固定为：\n"
         "## 总体判断\n"
@@ -82,7 +83,14 @@ def _candidate_summary(rank: int, item: Candidate) -> dict[str, Any]:
         "tags": list(item.tags),
         "latest_close": round(item.latest_close, 2),
         "circ_mv_yi": round(item.circ_mv, 1) if item.circ_mv > 0 else None,
-        "resistance": round(item.resistance, 2),
+        "signal_type": item.signal_type,
+        "signal_reason": item.signal_reason,
+        "pressure_zone": {
+            "low": round(item.zone_low or item.resistance, 2),
+            "mid": round(item.zone_mid or item.resistance, 2),
+            "upper": round(item.zone_upper or item.resistance, 2),
+            "span_weeks": item.span_weeks,
+        },
         "breakout_pct": round(item.breakout_pct * 100, 2),
         "volume_ratio": round(item.volume_ratio, 2),
         "volume_trend": round(item.volume_trend, 2),
@@ -96,7 +104,9 @@ def _candidate_summary(rank: int, item: Candidate) -> dict[str, Any]:
         "gross_margin": _rounded_optional(item.gross_margin),
         "debt_to_assets": _rounded_optional(item.debt_to_assets),
         "buy_zone": [round(item.buy_zone_low, 2), round(item.buy_zone_high, 2)],
-        "stop_loss": round(item.stop_loss, 2),
+        "trade_stop_loss": round(item.trade_stop_loss or item.stop_loss, 2),
+        "structure_stop_loss": round(item.structure_stop_loss or item.stop_loss, 2),
+        "trade_action": item.trade_action,
         "position_hint": item.position_hint,
     }
 
