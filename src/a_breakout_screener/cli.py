@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .config import AppConfig, load_config
 from .emailer import send_report, validate_email_transport
-from .backtest import run_backtest
+from .backtest import run_backtest, run_first_signal_backtest
 from .screener import run_scan
 
 
@@ -26,6 +26,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run(args, config)
     if args.command == "backtest":
         return _backtest(args, config)
+    if args.command == "backtest-first-signal":
+        return _backtest_first_signal(args, config)
 
     parser.print_help()
     return 2
@@ -58,6 +60,13 @@ def _build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--long-hold-top-n", type=int, default=10, help="Daily TopN for long-hold backtest, default: 10")
     backtest.add_argument("--capital-per-trade", type=float, default=1000.0, help="Capital per selected stock in long-hold backtest")
     backtest.add_argument("--stop-loss-pct", type=float, default=50.0, help="Stop loss percent for long-hold backtest")
+
+    first_signal = sub.add_parser("backtest-first-signal", help="Run one-year first-signal buy-once backtest")
+    first_signal.add_argument("--symbols", default="", help="Comma separated stock codes for a focused backtest")
+    first_signal.add_argument("--workers", type=int, default=0, help="Override worker threads for this run")
+    first_signal.add_argument("--lookback-days", type=int, default=365, help="Lookback calendar days, default: 365")
+    first_signal.add_argument("--capital-per-trade", type=float, default=1000.0, help="Capital per first signal, default: 1000")
+    first_signal.add_argument("--stop-loss-pct", type=float, default=30.0, help="Stop loss percent, default: 30")
     return parser
 
 
@@ -114,6 +123,29 @@ def _backtest(args: argparse.Namespace, config: AppConfig) -> int:
     print(f"汇总结果: {result.summary_path}")
     print(f"长持交易: {result.long_hold_trades_path}")
     print(f"长持汇总: {result.long_hold_summary_path}")
+    print(f"首次信号交易: {result.first_signal_trades_path}")
+    print(f"首次信号汇总: {result.first_signal_summary_path}")
+    print(f"可视化: {result.html_path}")
+    return 0
+
+
+def _backtest_first_signal(args: argparse.Namespace, config: AppConfig) -> int:
+    if args.workers and args.workers > 0:
+        config = replace(config, screener=replace(config.screener, max_workers=args.workers))
+    result = run_first_signal_backtest(
+        config=config,
+        lookback_days=max(1, args.lookback_days),
+        capital_per_trade=max(0.01, args.capital_per_trade),
+        stop_loss_pct=max(0.0, args.stop_loss_pct),
+        symbols={item.strip() for item in args.symbols.split(",") if item.strip()} or None,
+    )
+    print(
+        f"首次信号回测完成: {result.stock_count} 只股票，"
+        f"{result.signal_days} 个信号日，{result.trade_count} 笔买入"
+    )
+    print(f"首次信号交易: {result.trades_path}")
+    print(f"首次信号汇总: {result.summary_path}")
+    print(f"首次信号过滤: {result.filters_path}")
     print(f"可视化: {result.html_path}")
     return 0
 

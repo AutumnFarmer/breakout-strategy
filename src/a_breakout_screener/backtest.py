@@ -25,6 +25,20 @@ class BacktestResult:
     html_path: Path
     long_hold_trades_path: Path
     long_hold_summary_path: Path
+    first_signal_trades_path: Path
+    first_signal_summary_path: Path
+    signal_days: int
+    stock_count: int
+    trade_count: int
+
+
+@dataclass(frozen=True)
+class FirstSignalBacktestResult:
+    output_dir: Path
+    trades_path: Path
+    summary_path: Path
+    filters_path: Path
+    html_path: Path
     signal_days: int
     stock_count: int
     trade_count: int
@@ -134,6 +148,23 @@ def run_backtest(
         start_date=long_hold_start_date,
         end_date=long_hold_end_date,
     )
+    first_signal_trades, first_signal_filter_rows = _run_first_signal_backtest(
+        trading_dates=trading_dates,
+        prepared_histories=prepared_list,
+        config=config,
+        lookback_days=long_hold_days,
+        capital_per_trade=capital_per_trade,
+        stop_loss_pct=stop_loss_pct,
+    )
+    first_signal_trades_df = pd.DataFrame(first_signal_trades)
+    first_signal_summary_df = _summarize_first_signal(
+        first_signal_trades_df,
+        first_signal_filter_rows=first_signal_filter_rows,
+        capital_per_trade=capital_per_trade,
+        stop_loss_pct=stop_loss_pct,
+        start_date=long_hold_start_date,
+        end_date=long_hold_end_date,
+    )
 
     trades_path = output_dir / "backtest_trades.csv"
     summary_path = output_dir / "backtest_summary.csv"
@@ -141,6 +172,9 @@ def run_backtest(
     long_hold_trades_path = output_dir / "long_hold_trades.csv"
     long_hold_summary_path = output_dir / "long_hold_summary.csv"
     long_hold_filters_path = output_dir / "long_hold_filters.csv"
+    first_signal_trades_path = output_dir / "first_signal_trades.csv"
+    first_signal_summary_path = output_dir / "first_signal_summary.csv"
+    first_signal_filters_path = output_dir / "first_signal_filters.csv"
     html_path = output_dir / "backtest_report.html"
     trades_df.to_csv(trades_path, index=False, encoding="utf-8-sig")
     summary_df.to_csv(summary_path, index=False, encoding="utf-8-sig")
@@ -148,6 +182,9 @@ def run_backtest(
     long_hold_trades_df.to_csv(long_hold_trades_path, index=False, encoding="utf-8-sig")
     long_hold_summary_df.to_csv(long_hold_summary_path, index=False, encoding="utf-8-sig")
     pd.DataFrame(long_hold_filter_rows).to_csv(long_hold_filters_path, index=False, encoding="utf-8-sig")
+    first_signal_trades_df.to_csv(first_signal_trades_path, index=False, encoding="utf-8-sig")
+    first_signal_summary_df.to_csv(first_signal_summary_path, index=False, encoding="utf-8-sig")
+    pd.DataFrame(first_signal_filter_rows).to_csv(first_signal_filters_path, index=False, encoding="utf-8-sig")
     html_path.write_text(
         _render_html(
             summary_df,
@@ -156,6 +193,8 @@ def run_backtest(
             len(histories),
             long_hold_summary_df=long_hold_summary_df,
             long_hold_trades_df=long_hold_trades_df,
+            first_signal_summary_df=first_signal_summary_df,
+            first_signal_trades_df=first_signal_trades_df,
         ),
         encoding="utf-8",
     )
@@ -167,9 +206,86 @@ def run_backtest(
         html_path=html_path,
         long_hold_trades_path=long_hold_trades_path,
         long_hold_summary_path=long_hold_summary_path,
+        first_signal_trades_path=first_signal_trades_path,
+        first_signal_summary_path=first_signal_summary_path,
         signal_days=total,
         stock_count=len(histories),
-        trade_count=len(trades) + len(long_hold_trades),
+        trade_count=len(trades) + len(long_hold_trades) + len(first_signal_trades),
+    )
+
+
+def run_first_signal_backtest(
+    config: AppConfig,
+    lookback_days: int = 365,
+    capital_per_trade: float = 1000.0,
+    stop_loss_pct: float = 30.0,
+    symbols: set[str] | None = None,
+) -> FirstSignalBacktestResult:
+    histories = _load_histories(config.paths.cache_dir, symbols=symbols)
+    if not histories:
+        raise RuntimeError(f"没有可回测的历史缓存: {config.paths.cache_dir / 'hist'}")
+
+    names = _load_names_from_latest_daily(config.paths.cache_dir)
+    trading_dates = _common_trading_dates(histories)
+    if len(trading_dates) < config.screener.min_history_rows + 3:
+        raise RuntimeError("历史数据太少，无法回测")
+    prepared_histories = tuple(
+        _prepare_history(code, names.get(code, code), history, config.screener.ma_trend_period)
+        for code, history in histories.items()
+    )
+
+    end_ts = trading_dates[-1]
+    start_ts = end_ts - pd.Timedelta(days=lookback_days)
+    signal_dates = [ts for ts in trading_dates if ts >= start_ts and ts < end_ts]
+    trades, filter_rows = _run_first_signal_backtest(
+        trading_dates=trading_dates,
+        prepared_histories=prepared_histories,
+        config=config,
+        lookback_days=lookback_days,
+        capital_per_trade=capital_per_trade,
+        stop_loss_pct=stop_loss_pct,
+    )
+    trades_df = pd.DataFrame(trades)
+    summary_df = _summarize_first_signal(
+        trades_df,
+        first_signal_filter_rows=filter_rows,
+        capital_per_trade=capital_per_trade,
+        stop_loss_pct=stop_loss_pct,
+        start_date=start_ts.date().isoformat(),
+        end_date=end_ts.date().isoformat(),
+    )
+
+    output_dir = config.paths.output_dir / "backtest" / date.today().isoformat()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    trades_path = output_dir / "first_signal_trades.csv"
+    summary_path = output_dir / "first_signal_summary.csv"
+    filters_path = output_dir / "first_signal_filters.csv"
+    html_path = output_dir / "backtest_report.html"
+    trades_df.to_csv(trades_path, index=False, encoding="utf-8-sig")
+    summary_df.to_csv(summary_path, index=False, encoding="utf-8-sig")
+    pd.DataFrame(filter_rows).to_csv(filters_path, index=False, encoding="utf-8-sig")
+    html_path.write_text(
+        _render_html(
+            pd.DataFrame(),
+            pd.DataFrame(),
+            len(signal_dates),
+            len(histories),
+            long_hold_summary_df=pd.DataFrame(),
+            long_hold_trades_df=pd.DataFrame(),
+            first_signal_summary_df=summary_df,
+            first_signal_trades_df=trades_df,
+        ),
+        encoding="utf-8",
+    )
+    return FirstSignalBacktestResult(
+        output_dir=output_dir,
+        trades_path=trades_path,
+        summary_path=summary_path,
+        filters_path=filters_path,
+        html_path=html_path,
+        signal_days=len(signal_dates),
+        stock_count=len(histories),
+        trade_count=len(trades),
     )
 
 
@@ -370,6 +486,239 @@ def _long_hold_signal_date(
     return trades, total_checked, passed
 
 
+def _run_first_signal_backtest(
+    trading_dates: list[pd.Timestamp],
+    prepared_histories: tuple[PreparedHistory, ...],
+    config: AppConfig,
+    lookback_days: int,
+    capital_per_trade: float,
+    stop_loss_pct: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if len(trading_dates) < config.screener.min_history_rows + 3:
+        return [], []
+    end_ts = trading_dates[-1]
+    start_ts = end_ts - pd.Timedelta(days=lookback_days)
+    signal_dates = [ts for ts in trading_dates if ts >= start_ts and ts < end_ts]
+    trades: list[dict[str, Any]] = []
+    stop_loss_fraction = max(0.0, stop_loss_pct) / 100
+    total = len(prepared_histories)
+    max_workers = max(1, config.screener.max_workers)
+    if max_workers == 1 or total <= 1:
+        for idx, prepared in enumerate(prepared_histories, start=1):
+            trade = _first_signal_for_stock(
+                prepared=prepared,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                config=config,
+                capital_per_trade=capital_per_trade,
+                stop_loss_fraction=stop_loss_fraction,
+            )
+            if trade:
+                trades.append(trade)
+            if idx == 1 or idx % 200 == 0 or idx == total:
+                print(f"首次信号回测进度: {idx}/{total} 只股票", flush=True)
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    _first_signal_for_stock,
+                    prepared=prepared,
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    config=config,
+                    capital_per_trade=capital_per_trade,
+                    stop_loss_fraction=stop_loss_fraction,
+                ): prepared.code
+                for prepared in prepared_histories
+            }
+            for done_count, future in enumerate(as_completed(futures), start=1):
+                trade = future.result()
+                if trade:
+                    trades.append(trade)
+                if done_count == 1 or done_count % 200 == 0 or done_count == total:
+                    print(f"首次信号回测进度: {done_count}/{total} 只股票", flush=True)
+
+    trades.sort(key=lambda row: (row["signal_date"], row["signal_rank"], row["code"]))
+    signal_counts: dict[str, int] = {}
+    for trade in trades:
+        signal_counts[trade["signal_date"]] = signal_counts.get(trade["signal_date"], 0) + 1
+
+    held_unique_codes = 0
+    filter_rows: list[dict[str, Any]] = []
+    for signal_ts in signal_dates:
+        signal_date = signal_ts.date().isoformat()
+        new_buys = signal_counts.get(signal_date, 0)
+        held_unique_codes += new_buys
+        filter_rows.append(
+            {
+                "signal_date": signal_date,
+                "total_checked": "",
+                "passed": new_buys,
+                "new_buys": new_buys,
+                "held_unique_codes": held_unique_codes,
+            }
+        )
+    return trades, filter_rows
+
+
+def _first_signal_for_stock(
+    prepared: PreparedHistory,
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+    config: AppConfig,
+    capital_per_trade: float,
+    stop_loss_fraction: float,
+) -> dict[str, Any] | None:
+    history = prepared.history
+    start_pos = int(history["date"].searchsorted(start_ts, side="left"))
+    end_pos = int(history["date"].searchsorted(end_ts, side="left"))
+    first_pos = max(start_pos, config.screener.min_history_rows)
+    last_signal_pos = min(end_pos, len(history) - 1)
+    signal_rank = 0
+    resistance_by_week: dict[str, Any] = {}
+    for pos in range(first_pos, last_signal_pos):
+        latest = history.iloc[pos]
+        if _finite_float(latest.get("amount")) < config.screener.min_amount:
+            continue
+        if _finite_float(latest.get("close")) < config.screener.min_price:
+            continue
+        latest_ts = pd.Timestamp(latest["date"])
+        week_key = str(latest_ts.to_period("W-FRI"))
+        if week_key not in resistance_by_week:
+            resistance_by_week[week_key] = calc_resistance(
+                prepared.weekly,
+                latest_ts,
+                config.screener.resistance_lookback_weeks,
+            )
+        resistance = resistance_by_week[week_key]
+        if not resistance:
+            continue
+        close = _finite_float(latest.get("close"))
+        if close <= 0:
+            continue
+        breakout_pct = close / resistance.resistance - 1
+        if breakout_pct < config.screener.breakout_buffer or breakout_pct > config.screener.max_extension:
+            continue
+        candidate = _evaluate_prepared_at_pos(prepared, pos, config, resistance=resistance)
+        if not candidate or candidate.signal_type not in {"A", "B", "C"}:
+            continue
+
+        signal_rank += 1
+        entry_pos = pos + 1
+        entry_row = history.iloc[entry_pos]
+        entry_price = _finite_float(entry_row.get("open"))
+        if entry_price <= 0:
+            continue
+        exit_pos, exit_reason, exit_price = _long_hold_exit(history, entry_pos, end_ts, entry_price, stop_loss_fraction)
+        exit_row = history.iloc[exit_pos]
+        if exit_price <= 0:
+            continue
+        shares = capital_per_trade / entry_price
+        exit_value = shares * exit_price
+        pnl = exit_value - capital_per_trade
+        ret = exit_value / capital_per_trade - 1
+        return {
+            "signal_date": pd.Timestamp(latest["date"]).date().isoformat(),
+            "entry_date": pd.Timestamp(entry_row["date"]).date().isoformat(),
+            "exit_date": pd.Timestamp(exit_row["date"]).date().isoformat(),
+            "exit_reason": exit_reason,
+            "signal_rank": signal_rank,
+            "signal_type": candidate.signal_type,
+            "code": candidate.code,
+            "name": candidate.name,
+            "score": round(candidate.score, 4),
+            "breakout_pct": round(candidate.breakout_pct * 100, 4),
+            "volume_ratio": round(candidate.volume_ratio, 4),
+            "entry_price": round(entry_price, 4),
+            "stop_price": round(entry_price * (1 - stop_loss_fraction), 4),
+            "exit_price": round(exit_price, 4),
+            "shares": round(shares, 6),
+            "invested": round(capital_per_trade, 2),
+            "exit_value": round(exit_value, 2),
+            "pnl": round(pnl, 2),
+            "return_pct": round(ret * 100, 4),
+        }
+    return None
+
+
+def _first_signal_date(
+    signal_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+    prepared_histories: tuple[PreparedHistory, ...],
+    config: AppConfig,
+    bought_codes: set[str],
+    capital_per_trade: float,
+    stop_loss_fraction: float,
+) -> tuple[list[dict[str, Any]], int, int]:
+    total_checked = 0
+    daily_candidates: list[tuple[Candidate, pd.DataFrame, int]] = []
+    for prepared in prepared_histories:
+        if prepared.code in bought_codes:
+            continue
+        history = prepared.history
+        pos = history["date"].searchsorted(signal_ts, side="right") - 1
+        if pos < config.screener.min_history_rows:
+            continue
+        if pd.Timestamp(history.iloc[pos]["date"]).normalize() != signal_ts.normalize():
+            continue
+        if pos + 1 >= len(history):
+            continue
+        latest = history.iloc[pos]
+        if _finite_float(latest.get("amount")) < config.screener.min_amount:
+            continue
+        if _finite_float(latest.get("close")) < config.screener.min_price:
+            continue
+        total_checked += 1
+        candidate = _evaluate_prepared_at_pos(prepared, pos, config)
+        if candidate and candidate.signal_type in {"A", "B", "C"}:
+            daily_candidates.append((candidate, history, pos))
+
+    daily_candidates.sort(key=lambda item: item[0].score, reverse=True)
+    passed = len(daily_candidates)
+    trades: list[dict[str, Any]] = []
+    for signal_rank, (candidate, history, pos) in enumerate(daily_candidates, start=1):
+        if candidate.code in bought_codes:
+            continue
+        entry_pos = pos + 1
+        entry_row = history.iloc[entry_pos]
+        entry_price = _finite_float(entry_row.get("open"))
+        if entry_price <= 0:
+            continue
+        exit_pos, exit_reason, exit_price = _long_hold_exit(history, entry_pos, end_ts, entry_price, stop_loss_fraction)
+        exit_row = history.iloc[exit_pos]
+        if exit_price <= 0:
+            continue
+        shares = capital_per_trade / entry_price
+        exit_value = shares * exit_price
+        pnl = exit_value - capital_per_trade
+        ret = exit_value / capital_per_trade - 1
+        bought_codes.add(candidate.code)
+        trades.append(
+            {
+                "signal_date": signal_ts.date().isoformat(),
+                "entry_date": pd.Timestamp(entry_row["date"]).date().isoformat(),
+                "exit_date": pd.Timestamp(exit_row["date"]).date().isoformat(),
+                "exit_reason": exit_reason,
+                "signal_rank": signal_rank,
+                "signal_type": candidate.signal_type,
+                "code": candidate.code,
+                "name": candidate.name,
+                "score": round(candidate.score, 4),
+                "breakout_pct": round(candidate.breakout_pct * 100, 4),
+                "volume_ratio": round(candidate.volume_ratio, 4),
+                "entry_price": round(entry_price, 4),
+                "stop_price": round(entry_price * (1 - stop_loss_fraction), 4),
+                "exit_price": round(exit_price, 4),
+                "shares": round(shares, 6),
+                "invested": round(capital_per_trade, 2),
+                "exit_value": round(exit_value, 2),
+                "pnl": round(pnl, 2),
+                "return_pct": round(ret * 100, 4),
+            }
+        )
+    return trades, total_checked, passed
+
+
 def _long_hold_exit(
     history: pd.DataFrame,
     entry_pos: int,
@@ -461,7 +810,7 @@ def _monthly_span_series(daily: pd.DataFrame, months: int = 12, trading_rows: in
     return pd.Series(values, index=daily.index)
 
 
-def _evaluate_prepared_at_pos(prepared: PreparedHistory, pos: int, config: AppConfig) -> Candidate | None:
+def _evaluate_prepared_at_pos(prepared: PreparedHistory, pos: int, config: AppConfig, resistance: Any | None = None) -> Candidate | None:
     params = config.screener
     history = prepared.history
     latest = history.iloc[pos]
@@ -470,7 +819,8 @@ def _evaluate_prepared_at_pos(prepared: PreparedHistory, pos: int, config: AppCo
     if close <= 0:
         return None
 
-    resistance = calc_resistance(prepared.weekly, latest["date"], params.resistance_lookback_weeks)
+    if resistance is None:
+        resistance = calc_resistance(prepared.weekly, latest["date"], params.resistance_lookback_weeks)
     if not resistance:
         return None
 
@@ -679,6 +1029,75 @@ def _summarize_long_hold(
     )
 
 
+def _summarize_first_signal(
+    trades_df: pd.DataFrame,
+    first_signal_filter_rows: list[dict[str, Any]],
+    capital_per_trade: float,
+    stop_loss_pct: float,
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    signal_days = len(first_signal_filter_rows)
+    days_with_candidates = sum(1 for row in first_signal_filter_rows if int(row.get("passed", 0)) > 0)
+    total_passed = sum(int(row.get("passed", 0)) for row in first_signal_filter_rows)
+    base = {
+        "start_date": start_date,
+        "end_date": end_date,
+        "capital_per_trade": round(capital_per_trade, 2),
+        "stop_loss_pct": round(stop_loss_pct, 2),
+        "signal_days": signal_days,
+        "days_with_candidates": days_with_candidates,
+        "raw_first_signal_candidates": total_passed,
+        "duplicate_policy": "same_code_buy_once",
+    }
+    if trades_df.empty:
+        return pd.DataFrame(
+            [
+                {
+                    **base,
+                    "trades": 0,
+                    "total_invested": 0.0,
+                    "ending_value": 0.0,
+                    "total_pnl": 0.0,
+                    "total_return_pct": 0.0,
+                    "win_rate_pct": 0.0,
+                    "stopped_trades": 0,
+                    "stop_loss_rate_pct": 0.0,
+                    "avg_return_pct": 0.0,
+                    "best_return_pct": 0.0,
+                    "worst_return_pct": 0.0,
+                }
+            ]
+        )
+
+    invested = trades_df["invested"].astype(float)
+    exit_value = trades_df["exit_value"].astype(float)
+    pnl = trades_df["pnl"].astype(float)
+    returns = trades_df["return_pct"].astype(float)
+    stopped = trades_df["exit_reason"].eq("stop_loss")
+    total_invested = float(invested.sum())
+    ending_value = float(exit_value.sum())
+    total_pnl = float(pnl.sum())
+    return pd.DataFrame(
+        [
+            {
+                **base,
+                "trades": int(len(trades_df)),
+                "total_invested": round(total_invested, 2),
+                "ending_value": round(ending_value, 2),
+                "total_pnl": round(total_pnl, 2),
+                "total_return_pct": round(total_pnl / total_invested * 100 if total_invested > 0 else 0.0, 3),
+                "win_rate_pct": round(float((returns > 0).mean() * 100), 2),
+                "stopped_trades": int(stopped.sum()),
+                "stop_loss_rate_pct": round(float(stopped.mean() * 100), 2),
+                "avg_return_pct": round(float(returns.mean()), 3),
+                "best_return_pct": round(float(returns.max()), 3),
+                "worst_return_pct": round(float(returns.min()), 3),
+            }
+        ]
+    )
+
+
 def _max_drawdown(equity: pd.Series) -> float:
     if equity.empty:
         return 0.0
@@ -694,6 +1113,8 @@ def _render_html(
     stock_count: int,
     long_hold_summary_df: pd.DataFrame,
     long_hold_trades_df: pd.DataFrame,
+    first_signal_summary_df: pd.DataFrame,
+    first_signal_trades_df: pd.DataFrame,
 ) -> str:
     summary_rows = summary.to_dict(orient="records")
     top_trades = trades.sort_values("return_pct", ascending=False).head(20).to_dict(orient="records") if not trades.empty else []
@@ -701,6 +1122,9 @@ def _render_html(
     long_hold_summary = long_hold_summary_df.to_dict(orient="records")
     long_hold_top = long_hold_trades_df.sort_values("pnl", ascending=False).head(20).to_dict(orient="records") if not long_hold_trades_df.empty else []
     long_hold_worst = long_hold_trades_df.sort_values("pnl", ascending=True).head(20).to_dict(orient="records") if not long_hold_trades_df.empty else []
+    first_signal_summary = first_signal_summary_df.to_dict(orient="records")
+    first_signal_top = first_signal_trades_df.sort_values("pnl", ascending=False).head(20).to_dict(orient="records") if not first_signal_trades_df.empty else []
+    first_signal_worst = first_signal_trades_df.sort_values("pnl", ascending=True).head(20).to_dict(orient="records") if not first_signal_trades_df.empty else []
     payload = {
         "summary": summary_rows,
         "topTrades": top_trades,
@@ -708,11 +1132,15 @@ def _render_html(
         "longHoldSummary": long_hold_summary,
         "longHoldTopTrades": long_hold_top,
         "longHoldWorstTrades": long_hold_worst,
+        "firstSignalSummary": first_signal_summary,
+        "firstSignalTopTrades": first_signal_top,
+        "firstSignalWorstTrades": first_signal_worst,
         "meta": {
             "signalDays": signal_days,
             "stockCount": stock_count,
             "tradeCount": int(len(trades)),
             "longHoldTradeCount": int(len(long_hold_trades_df)),
+            "firstSignalTradeCount": int(len(first_signal_trades_df)),
         },
     }
     return HTML_TEMPLATE.replace("__BACKTEST_DATA__", json.dumps(payload, ensure_ascii=False))
@@ -755,12 +1183,18 @@ HTML_TEMPLATE = """<!doctype html>
       <div class="stat"><span>股票数</span><strong id="stockCount"></strong></div>
       <div class="stat"><span>短持交易</span><strong id="tradeCount"></strong></div>
       <div class="stat"><span>长持交易</span><strong id="longHoldTradeCount"></strong></div>
+      <div class="stat"><span>首次信号交易</span><strong id="firstSignalTradeCount"></strong></div>
     </div>
   </header>
   <main>
     <section>
+      <h2>首次信号买入</h2>
+      <div class="note">口径：从一年前开始逐个交易日回放策略信号，A/B/C 类首次出现则下一交易日开盘买入；同一股票后续重复信号不重复买入；每只买入 1000 元，持有到最新交易日或触发设定止损。</div>
+      <div class="wrap"><table id="firstSignalSummaryTable"></table></div>
+    </section>
+    <section>
       <h2>年度长持口径</h2>
-      <div class="note">口径：从一年前开始逐个交易日回放策略信号，每日取 Top10，下一交易日开盘每只买入 1000 元，持有到最新交易日；期间触发 -50% 止损则按止损价卖出。</div>
+      <div class="note">口径：从一年前开始逐个交易日回放策略信号，每日取 TopN，下一交易日开盘按设定金额买入，持有到最新交易日；期间触发设定止损则按止损价卖出。</div>
       <div class="wrap"><table id="longHoldSummaryTable"></table></div>
     </section>
     <section>
@@ -769,6 +1203,14 @@ HTML_TEMPLATE = """<!doctype html>
       <div class="wrap"><table id="summaryTable"></table></div>
     </section>
     <div class="grid">
+      <section>
+        <h2>首次信号盈利最高</h2>
+        <div class="wrap"><table id="firstSignalTopTrades"></table></div>
+      </section>
+      <section>
+        <h2>首次信号亏损最大</h2>
+        <div class="wrap"><table id="firstSignalWorstTrades"></table></div>
+      </section>
       <section>
         <h2>长持盈利最高</h2>
         <div class="wrap"><table id="longHoldTopTrades"></table></div>
@@ -793,6 +1235,7 @@ HTML_TEMPLATE = """<!doctype html>
     document.getElementById("stockCount").textContent = DATA.meta.stockCount;
     document.getElementById("tradeCount").textContent = DATA.meta.tradeCount;
     document.getElementById("longHoldTradeCount").textContent = DATA.meta.longHoldTradeCount;
+    document.getElementById("firstSignalTradeCount").textContent = DATA.meta.firstSignalTradeCount;
     function fmt(value, digits = 2) {
       if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
       return Number(value).toFixed(digits);
@@ -850,6 +1293,32 @@ HTML_TEMPLATE = """<!doctype html>
       });
       table.appendChild(body);
     }
+    function renderFirstSignalSummary(rows) {
+      const table = document.getElementById("firstSignalSummaryTable");
+      table.innerHTML = "<thead><tr><th>区间</th><th>单只买入</th><th>止损</th><th>信号日</th><th>有候选日</th><th>首次候选</th><th>买入数</th><th>总投入</th><th>期末/止损后市值</th><th>总收益</th><th>总收益率</th><th>胜率</th><th>止损数</th><th>止损率</th></tr></thead>";
+      const body = document.createElement("tbody");
+      rows.forEach(row => {
+        const tr = document.createElement("tr");
+        tr.append(
+          cell(`${row.start_date} ~ ${row.end_date}`),
+          cell(fmt(row.capital_per_trade, 0)),
+          cell(`${fmt(row.stop_loss_pct)}%`),
+          cell(row.signal_days),
+          cell(row.days_with_candidates),
+          cell(row.raw_first_signal_candidates),
+          cell(row.trades),
+          cell(fmt(row.total_invested, 2)),
+          cell(fmt(row.ending_value, 2)),
+          money(row.total_pnl),
+          signed(row.total_return_pct),
+          cell(`${fmt(row.win_rate_pct)}%`),
+          cell(row.stopped_trades),
+          cell(`${fmt(row.stop_loss_rate_pct)}%`)
+        );
+        body.appendChild(tr);
+      });
+      table.appendChild(body);
+    }
     function signed(value) {
       return cell(`${fmt(value, 3)}%`, Number(value) >= 0 ? "pos" : "neg");
     }
@@ -886,7 +1355,7 @@ HTML_TEMPLATE = """<!doctype html>
           cell(row.signal_date),
           cell(row.entry_date),
           cell(`${row.code} ${row.name}`, "name"),
-          cell(row.rank),
+          cell(row.rank ?? row.signal_rank),
           cell(row.exit_reason === "stop_loss" ? "止损" : row.exit_date),
           cell(fmt(row.entry_price)),
           cell(fmt(row.exit_price)),
@@ -899,6 +1368,9 @@ HTML_TEMPLATE = """<!doctype html>
       });
       table.appendChild(body);
     }
+    renderFirstSignalSummary(DATA.firstSignalSummary);
+    renderLongHoldTrades("firstSignalTopTrades", DATA.firstSignalTopTrades);
+    renderLongHoldTrades("firstSignalWorstTrades", DATA.firstSignalWorstTrades);
     renderLongHoldSummary(DATA.longHoldSummary);
     renderLongHoldTrades("longHoldTopTrades", DATA.longHoldTopTrades);
     renderLongHoldTrades("longHoldWorstTrades", DATA.longHoldWorstTrades);

@@ -1,10 +1,19 @@
 from __future__ import annotations
 
-import pytest
-import pandas as pd
+from types import SimpleNamespace
 
-from a_breakout_screener.backtest import _backtest_signal_date, _long_hold_exit, _prepare_history, _summarize_long_hold
+import pandas as pd
+import pytest
+
+from a_breakout_screener.backtest import (
+    _backtest_signal_date,
+    _long_hold_exit,
+    _prepare_history,
+    _run_first_signal_backtest,
+    _summarize_long_hold,
+)
 from a_breakout_screener.config import AppConfig, ScreenerConfig
+from a_breakout_screener.models import Candidate
 
 
 def test_prepare_history_uses_configured_trend_period() -> None:
@@ -104,3 +113,52 @@ def test_summarize_long_hold_totals_portfolio_result() -> None:
     assert row["total_pnl"] == -300
     assert row["total_return_pct"] == pytest.approx(-15)
     assert row["stopped_trades"] == 1
+
+
+def test_first_signal_backtest_buys_same_stock_once(monkeypatch) -> None:
+    dates = pd.bdate_range("2026-01-01", periods=8)
+    history = pd.DataFrame(
+        {
+            "date": dates,
+            "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
+            "high": [11.0] * 8,
+            "low": [9.5] * 8,
+            "close": [10.0, 10.5, 11.0, 11.5, 12.0, 12.5, 13.0, 13.5],
+            "volume": [1_000_000] * 8,
+            "amount": [100_000_000] * 8,
+        }
+    )
+    prepared = _prepare_history("000001", "平安银行", history)
+    config = AppConfig(screener=ScreenerConfig(min_history_rows=1, min_amount=1, min_price=1))
+
+    def always_signal(prepared, pos, config, resistance=None):
+        return Candidate(
+            code=prepared.code,
+            name=prepared.name,
+            latest_close=10.0,
+            resistance=9.0,
+            breakout_pct=0.03,
+            volume_ratio=2.0,
+            signal_type="B",
+            score=80.0,
+        )
+
+    monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", always_signal)
+    monkeypatch.setattr(
+        "a_breakout_screener.backtest.calc_resistance",
+        lambda *args, **kwargs: SimpleNamespace(resistance=10.2),
+    )
+
+    trades, filters = _run_first_signal_backtest(
+        trading_dates=[pd.Timestamp(item) for item in dates],
+        prepared_histories=(prepared,),
+        config=config,
+        lookback_days=30,
+        capital_per_trade=1000,
+        stop_loss_pct=30,
+    )
+
+    assert len(trades) == 1
+    assert trades[0]["code"] == "000001"
+    assert trades[0]["invested"] == 1000
+    assert filters[-1]["held_unique_codes"] == 1

@@ -31,6 +31,9 @@ if [ -n "$LATEST_BACKTEST" ] && [ -f "$LATEST_BACKTEST" ]; then
   cp "$BACKTEST_DIR/long_hold_summary.csv" "$SITE_DIR/long_hold_summary.csv" 2>/dev/null || true
   cp "$BACKTEST_DIR/long_hold_trades.csv" "$SITE_DIR/long_hold_trades.csv" 2>/dev/null || true
   cp "$BACKTEST_DIR/long_hold_filters.csv" "$SITE_DIR/long_hold_filters.csv" 2>/dev/null || true
+  cp "$BACKTEST_DIR/first_signal_summary.csv" "$SITE_DIR/first_signal_summary.csv" 2>/dev/null || true
+  cp "$BACKTEST_DIR/first_signal_trades.csv" "$SITE_DIR/first_signal_trades.csv" 2>/dev/null || true
+  cp "$BACKTEST_DIR/first_signal_filters.csv" "$SITE_DIR/first_signal_filters.csv" 2>/dev/null || true
 fi
 
 echo "Published $LATEST_DIR to $SITE_DIR"
