@@ -345,6 +345,7 @@ def _check_one(
         end_date=end_date,
         cache_dir=config.paths.cache_dir,
         force_refresh=force_refresh,
+        allow_truncated_start=True,
     )
     candidate = evaluate_stock(code=code, name=name, history=history, params=config.screener)
     if not candidate:

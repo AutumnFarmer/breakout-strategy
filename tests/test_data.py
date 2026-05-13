@@ -94,6 +94,33 @@ def test_fetch_history_backfills_older_cache_when_lookback_expands(monkeypatch, 
     assert "2026-01-02" in set(cached["date"].astype(str))
 
 
+def test_fetch_history_allows_truncated_start_after_bulk_cache(monkeypatch, tmp_path) -> None:
+    cache_path = tmp_path / "hist" / "001234.csv"
+    cache_path.parent.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {"date": "2026-01-10", "open": 10, "high": 11, "low": 9, "close": 10, "volume": 100, "amount": 1000},
+            {"date": "2026-02-01", "open": 12, "high": 13, "low": 11, "close": 12, "volume": 100, "amount": 1000},
+        ]
+    ).to_csv(cache_path, index=False)
+
+    def fail_fetch(*args, **kwargs):
+        raise AssertionError("should not fetch older per-symbol history after bulk cache")
+
+    monkeypatch.setattr(data, "_fetch_history_from_source", fail_fetch)
+
+    history = data.fetch_history(
+        "001234",
+        date(2026, 1, 1),
+        date(2026, 2, 1),
+        tmp_path,
+        allow_truncated_start=True,
+    )
+
+    assert history["date"].min().date() == date(2026, 1, 10)
+    assert history["date"].max().date() == date(2026, 2, 1)
+
+
 def test_call_tushare_retries_transient_failure(monkeypatch) -> None:
     calls = {"count": 0}
 

@@ -166,6 +166,7 @@ def fetch_history(
     end_date: date,
     cache_dir: Path,
     force_refresh: bool = False,
+    allow_truncated_start: bool = False,
 ) -> pd.DataFrame:
     symbol = symbol.zfill(6)
     cache_path = cache_dir / "hist" / f"{symbol}.csv"
@@ -179,6 +180,8 @@ def fetch_history(
             earliest_cached = cached["date"].min().date()
             latest_cached = cached["date"].max().date()
             if earliest_cached <= start_date and latest_cached >= end_date:
+                return _slice_history(cached, start_date, end_date)
+            if allow_truncated_start and latest_cached >= end_date:
                 return _slice_history(cached, start_date, end_date)
             if earliest_cached > start_date:
                 fetch_end = min(end_date, earliest_cached + timedelta(days=14))
