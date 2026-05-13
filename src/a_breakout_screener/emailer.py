@@ -49,6 +49,24 @@ def send_report(
             _login_and_send(smtp, email_config, msg)
 
 
+def validate_email_transport(email_config: EmailConfig) -> list[str]:
+    problems = email_config.missing_fields()
+    if problems:
+        return problems
+    if email_config.method == "mail":
+        if not (shutil.which("mail") or shutil.which("sendmail") or Path("/usr/sbin/sendmail").exists()):
+            problems.append("mail_or_sendmail")
+        return problems
+    if email_config.method in {"codex_gmail", "gmail"}:
+        if not shutil.which("codex"):
+            problems.append("codex")
+        return problems
+    if email_config.method == "smtp":
+        return problems
+    problems.append(f"unsupported_method:{email_config.method}")
+    return problems
+
+
 def _login_and_send(smtp: smtplib.SMTP, email_config: EmailConfig, msg: EmailMessage) -> None:
     smtp.login(email_config.smtp_user, email_config.smtp_password)
     smtp.send_message(msg)

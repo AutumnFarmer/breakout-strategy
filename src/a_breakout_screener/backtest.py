@@ -14,7 +14,7 @@ import pandas as pd
 from .config import AppConfig
 from .data import _normalize_history
 from .models import Candidate
-from .scoring import _to_weekly, _weekly_span_mean, assess_candidate, calc_resistance
+from .scoring import _activity_series, _to_weekly, _weekly_span_mean, assess_candidate, calc_resistance
 
 
 @dataclass(frozen=True)
@@ -393,9 +393,7 @@ def _prepare_history(code: str, name: str, history: pd.DataFrame, ma_trend_perio
     prepared["ma10"] = prepared["close"].rolling(10).mean()
     prepared["ma20"] = prepared["close"].rolling(20).mean()
 
-    activity = pd.to_numeric(prepared["amount"] if "amount" in prepared.columns else prepared["volume"], errors="coerce").fillna(0)
-    if float(activity.tail(20).sum()) <= 0:
-        activity = pd.to_numeric(prepared["volume"], errors="coerce").fillna(0)
+    activity = _activity_series(prepared)
     volume_baseline = activity.shift(1).rolling(19).mean()
     prepared["bt_volume_ratio"] = activity / volume_baseline
     prepared["bt_volume_trend"] = activity.rolling(5).mean() / volume_baseline

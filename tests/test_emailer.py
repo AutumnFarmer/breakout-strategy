@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 
 from a_breakout_screener.config import EmailConfig
-from a_breakout_screener.emailer import send_report
+from a_breakout_screener.emailer import send_report, validate_email_transport
 
 
 def test_codex_gmail_method_invokes_codex(monkeypatch) -> None:
@@ -31,3 +31,13 @@ def test_codex_gmail_method_invokes_codex(monkeypatch) -> None:
     assert "--dangerously-bypass-approvals-and-sandbox" in cmd
     assert "user@example.com" in cmd[-1]
     assert "测试主题" in cmd[-1]
+
+
+def test_validate_codex_gmail_transport_requires_codex(monkeypatch) -> None:
+    monkeypatch.setattr("a_breakout_screener.emailer.shutil.which", lambda name: None)
+
+    problems = validate_email_transport(
+        EmailConfig(enabled=True, method="codex_gmail", mail_to=("user@example.com",)),
+    )
+
+    assert problems == ["codex"]

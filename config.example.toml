@@ -3,9 +3,15 @@ top_n = 30
 max_workers = 6
 history_days = 900
 resistance_lookback_weeks = 52
+# 构建周线压力区时排除最近 N 周，避免把刚形成的短期高点当长期压力
+resistance_exclude_recent_weeks = 4
 min_history_rows = 160
 breakout_buffer = 0.0
+# V2 有效突破线，低于该幅度会降为 D 类；0.02 = 2%
+effective_breakout_pct = 0.02
 max_extension = 0.12
+# V2 强量能门槛，基于成交额优先、无成交额时回退成交量
+strong_volume_ratio = 1.8
 min_amount = 80000000
 min_price = 3.0
 allowed_prefixes = ["00", "30", "60", "68"]

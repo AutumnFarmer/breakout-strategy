@@ -44,6 +44,8 @@ def _candidate_payload(rank: int, item: Candidate) -> dict[str, Any]:
         "rank": rank,
         "code": item.code,
         "name": item.name,
+        "signalType": item.signal_type,
+        "signalReason": item.signal_reason,
         "latestClose": round(item.latest_close, 4),
         "resistance": round(item.resistance, 4),
         "breakoutPct": round(item.breakout_pct * 100, 4),
@@ -57,6 +59,11 @@ def _candidate_payload(rank: int, item: Candidate) -> dict[str, Any]:
         "buyLow": round(item.buy_zone_low, 4),
         "buyHigh": round(item.buy_zone_high, 4),
         "stopLoss": round(item.stop_loss, 4),
+        "tradeStopLoss": round(item.trade_stop_loss or item.stop_loss, 4),
+        "structureStopLoss": round(item.structure_stop_loss or item.stop_loss, 4),
+        "totalAssetPosition": item.total_asset_position,
+        "strategyPosition": item.strategy_position,
+        "maxLossAssetPct": item.max_loss_asset_pct,
         "hint": item.position_hint,
         "latestTradeDate": item.latest_trade_date.isoformat(),
     }
@@ -332,6 +339,7 @@ HTML_TEMPLATE = """<!doctype html>
           <thead>
             <tr>
               <th>排名</th>
+              <th>类型</th>
               <th class="name">股票</th>
               <th>收盘</th>
               <th>市值(亿)</th>
@@ -364,10 +372,13 @@ HTML_TEMPLATE = """<!doctype html>
       </div>
       <div class="detail-grid">
         <div class="detail"><span>买入区</span><strong id="buyZone"></strong></div>
-        <div class="detail"><span>止损位</span><strong id="stopLoss"></strong></div>
+        <div class="detail"><span>交易止损</span><strong id="tradeStopLoss"></strong></div>
+        <div class="detail"><span>结构止损</span><strong id="structureStopLoss"></strong></div>
         <div class="detail"><span>阻力触达</span><strong id="touches"></strong></div>
         <div class="detail"><span>聚类大小</span><strong id="cluster"></strong></div>
         <div class="detail"><span>ATR%</span><strong id="atr"></strong></div>
+        <div class="detail"><span>信号说明</span><strong id="signalReason"></strong></div>
+        <div class="detail"><span>仓位口径</span><strong id="positionRule"></strong></div>
         <div class="detail"><span>选中K线</span><strong id="hoverInfo"></strong></div>
       </div>
     </section>
@@ -400,7 +411,7 @@ HTML_TEMPLATE = """<!doctype html>
       if (!DASHBOARD.candidates.length) {
         const row = document.createElement("tr");
         const cell = document.createElement("td");
-        cell.colSpan = 10;
+        cell.colSpan = 11;
         cell.className = "empty";
         cell.textContent = "今日没有符合条件的候选。";
         row.appendChild(cell);
@@ -413,6 +424,7 @@ HTML_TEMPLATE = """<!doctype html>
         if (item.code === state.code) row.classList.add("selected");
         const cells = [
           item.rank,
+          item.signalType,
           `${item.code} ${item.name}`,
           fmt(item.latestClose),
           item.circMv > 0 ? fmt(item.circMv, 1) : "-",
@@ -426,9 +438,9 @@ HTML_TEMPLATE = """<!doctype html>
         cells.forEach((value, idx) => {
           const cell = document.createElement("td");
           cell.textContent = value;
-          if (idx === 1) cell.className = "name";
-          if (idx === 4 && item.breakoutPct > 0) cell.classList.add("strong");
-          if (idx === 8) cell.classList.add("score");
+          if (idx === 2) cell.className = "name";
+          if (idx === 6 && item.breakoutPct > 0) cell.classList.add("strong");
+          if (idx === 10) cell.classList.add("score");
           row.appendChild(cell);
         });
         row.addEventListener("click", () => {
@@ -488,12 +500,16 @@ HTML_TEMPLATE = """<!doctype html>
 
       document.getElementById("chartName").textContent = `${item.code} ${item.name}`;
       document.getElementById("chartMeta").textContent =
-        `收盘 ${fmt(item.latestClose)} / 市值 ${item.circMv > 0 ? fmt(item.circMv, 1) + '亿' : '-'} / 阻力 ${fmt(item.resistance)} / 突破 ${fmt(item.breakoutPct)}% / 得分 ${fmt(item.score, 1)} / ${item.hint}`;
+        `${item.signalType}类 / 收盘 ${fmt(item.latestClose)} / 市值 ${item.circMv > 0 ? fmt(item.circMv, 1) + '亿' : '-'} / 阻力 ${fmt(item.resistance)} / 突破 ${fmt(item.breakoutPct)}% / 得分 ${fmt(item.score, 1)} / ${item.hint}`;
       document.getElementById("buyZone").textContent = `${fmt(item.buyLow)} - ${fmt(item.buyHigh)}`;
-      document.getElementById("stopLoss").textContent = fmt(item.stopLoss);
+      document.getElementById("tradeStopLoss").textContent = fmt(item.tradeStopLoss);
+      document.getElementById("structureStopLoss").textContent = fmt(item.structureStopLoss);
       document.getElementById("touches").textContent = `${item.touches} 次`;
       document.getElementById("cluster").textContent = `${item.clusterSize || "-"} 根K线`;
       document.getElementById("atr").textContent = `${fmt(item.atrPct)}%`;
+      document.getElementById("signalReason").textContent = item.signalReason || "-";
+      document.getElementById("positionRule").textContent =
+        `${item.totalAssetPosition} / 策略内 ${item.strategyPosition} / 最大亏损 ${item.maxLossAssetPct}`;
 
       if (!data.length) {
         ctx.fillStyle = "#667085";
@@ -510,8 +526,8 @@ HTML_TEMPLATE = """<!doctype html>
       const volumeBottom = height - 26;
       const highs = data.map(row => row.high);
       const lows = data.map(row => row.low);
-      highs.push(item.resistance, item.buyHigh, item.stopLoss);
-      lows.push(item.resistance, item.buyLow, item.stopLoss);
+      highs.push(item.resistance, item.buyHigh, item.tradeStopLoss, item.structureStopLoss);
+      lows.push(item.resistance, item.buyLow, item.tradeStopLoss, item.structureStopLoss);
       let maxPrice = Math.max(...highs);
       let minPrice = Math.min(...lows);
       const pad = Math.max((maxPrice - minPrice) * 0.08, maxPrice * 0.01, 0.5);
@@ -539,7 +555,8 @@ HTML_TEMPLATE = """<!doctype html>
       ctx.fillStyle = "rgba(31, 111, 235, 0.08)";
       ctx.fillRect(left, Math.min(buyY1, buyY2), right - left, Math.abs(buyY2 - buyY1));
       drawLine(yScale(item.resistance, minPrice, maxPrice, top, priceBottom), "#1f6feb", "阻力");
-      drawLine(yScale(item.stopLoss, minPrice, maxPrice, top, priceBottom), "#b76e00", "止损");
+      drawLine(yScale(item.tradeStopLoss, minPrice, maxPrice, top, priceBottom), "#b76e00", "交易止损");
+      drawLine(yScale(item.structureStopLoss, minPrice, maxPrice, top, priceBottom), "#7654a6", "结构止损");
 
       data.forEach((row, idx) => {
         const x = left + step * idx + step / 2;

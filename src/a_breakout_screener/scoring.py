@@ -360,11 +360,14 @@ def _volume_trend(daily: pd.DataFrame) -> float:
 
 
 def _activity_series(daily: pd.DataFrame) -> pd.Series:
+    volume = pd.to_numeric(daily["volume"], errors="coerce").fillna(0)
     if "amount" in daily.columns:
         amount = pd.to_numeric(daily["amount"], errors="coerce").fillna(0)
-        if float(amount.tail(20).sum()) > 0:
+        ratio = amount / volume.replace(0, np.nan)
+        recent_ratio = ratio.tail(20).replace([np.inf, -np.inf], np.nan).dropna()
+        if not recent_ratio.empty and float((recent_ratio > 10).mean()) >= 0.8:
             return amount
-    return pd.to_numeric(daily["volume"], errors="coerce").fillna(0)
+    return volume
 
 
 def _calc_atr(daily: pd.DataFrame, period: int = 14) -> float:

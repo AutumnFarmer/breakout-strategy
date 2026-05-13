@@ -3,11 +3,11 @@ from __future__ import annotations
 import pandas as pd
 
 from a_breakout_screener.config import ScreenerConfig
-from a_breakout_screener.scoring import evaluate_stock
+from a_breakout_screener.scoring import _activity_series, calc_resistance, evaluate_stock
 
 
 def test_evaluate_stock_accepts_fresh_weekly_breakout() -> None:
-    history = _sample_history(latest_close=12.2, latest_volume=2_000_000)
+    history = _sample_history(latest_close=12.04, latest_volume=2_000_000)
     candidate = evaluate_stock("000001", "平安银行", history, ScreenerConfig(min_history_rows=120))
 
     assert candidate is not None
@@ -16,6 +16,9 @@ def test_evaluate_stock_accepts_fresh_weekly_breakout() -> None:
     assert 0 <= candidate.breakout_pct <= 0.12
     assert candidate.volume_ratio > 1
     assert candidate.score > 50
+    assert candidate.signal_type in {"A", "B", "C", "D"}
+    assert candidate.trade_stop_loss == candidate.resistance * 0.97
+    assert "建议仓位约" not in candidate.position_hint
 
 
 def test_evaluate_stock_rejects_overextended_breakout() -> None:
@@ -35,6 +38,45 @@ def test_evaluate_stock_rejects_when_trend_ma_has_insufficient_history() -> None
     )
 
     assert candidate is None
+
+
+def test_calc_resistance_excludes_recent_weeks() -> None:
+    week_ends = pd.date_range("2025-10-24", periods=30, freq="W-FRI")
+    weekly = pd.DataFrame(
+        {
+            "week_end": week_ends,
+            "open": 9.8,
+            "high": 10.0,
+            "low": 9.5,
+            "close": 9.9,
+            "volume": 1_000_000,
+            "amount": 10_000_000,
+        }
+    )
+    weekly.loc[weekly.index[-5:], "high"] = 13.0
+    weekly.loc[weekly.index[-5:], "close"] = 12.8
+
+    latest = pd.Timestamp("2026-05-15")
+    excluded = calc_resistance(weekly, latest, lookback_weeks=52, exclude_recent_weeks=4, top_k=4)
+    included = calc_resistance(weekly, latest, lookback_weeks=52, exclude_recent_weeks=0, top_k=4)
+
+    assert excluded is not None
+    assert included is not None
+    assert excluded.resistance < 11
+    assert included.resistance > 12
+
+
+def test_activity_series_falls_back_to_volume_when_amount_units_are_mixed() -> None:
+    daily = pd.DataFrame(
+        {
+            "volume": [10_000] * 15 + [20_000] * 5,
+            "amount": [30_000_000] * 15 + [20_000] * 5,
+        }
+    )
+
+    activity = _activity_series(daily)
+
+    assert activity.equals(daily["volume"])
 
 
 def _sample_history(latest_close: float, latest_volume: int) -> pd.DataFrame:

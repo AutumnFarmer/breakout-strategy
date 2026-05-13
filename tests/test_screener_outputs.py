@@ -15,6 +15,8 @@ def test_write_outputs_creates_report_files(tmp_path) -> None:
         breakout_pct=0.0339,
         volume_ratio=2.1,
         resistance_touches=4,
+        signal_type="B",
+        signal_reason="日线预警突破，等待周线收盘确认",
         monthly_span_pct=0.52,
         ma10=11.7,
         ma20=11.3,
@@ -25,7 +27,9 @@ def test_write_outputs_creates_report_files(tmp_path) -> None:
         buy_zone_low=11.74,
         buy_zone_high=12.09,
         stop_loss=11.0,
-        position_hint="强观察：可小仓试探，等待回踩确认",
+        trade_stop_loss=11.45,
+        structure_stop_loss=11.0,
+        position_hint="B类：日线预警突破，等待周线收盘确认；不直接追买，先小仓观察",
     )
 
     csv_path, xlsx_path, markdown_path, html_path = write_outputs(
@@ -41,8 +45,15 @@ def test_write_outputs_creates_report_files(tmp_path) -> None:
     assert xlsx_path.exists()
     assert markdown_path.exists()
     assert html_path.exists()
-    assert "平安银行" in markdown_path.read_text(encoding="utf-8")
-    assert "A股突破选股复核" in html_path.read_text(encoding="utf-8")
+    markdown = markdown_path.read_text(encoding="utf-8")
+    html = html_path.read_text(encoding="utf-8")
+    assert "平安银行" in markdown
+    assert "交易止损" in markdown
+    assert "总资产仓位" in markdown
+    assert "建议仓位约" not in markdown
+    assert "A股突破选股复核" in html
+    assert "tradeStopLoss" in html
+    assert "信号说明" in html
 
 
 def test_render_markdown_report_handles_empty_candidates() -> None:
