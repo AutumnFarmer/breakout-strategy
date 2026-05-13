@@ -114,6 +114,44 @@ def test_call_tushare_retries_transient_failure(monkeypatch) -> None:
     assert calls["count"] == 2
 
 
+def test_fetch_tushare_daily_range_parallel_writes_date_cache(monkeypatch, tmp_path) -> None:
+    trade_dates = ["20260102", "20260105", "20260106"]
+
+    class CalendarPro:
+        def trade_cal(self, **kwargs):
+            return pd.DataFrame({"cal_date": trade_dates})
+
+    class DailyPro:
+        def daily(self, **kwargs):
+            trade_date = kwargs["trade_date"]
+            return pd.DataFrame(
+                [
+                    {
+                        "ts_code": "000001.SZ",
+                        "trade_date": trade_date,
+                        "open": 10,
+                        "high": 11,
+                        "low": 9,
+                        "close": 10.5,
+                        "vol": 1000,
+                        "amount": 2000,
+                    }
+                ]
+            )
+
+    monkeypatch.setenv("TUSHARE_DAILY_WORKERS", "2")
+    monkeypatch.setattr(data.time, "sleep", lambda _: None)
+    monkeypatch.setattr("a_breakout_screener.tushare_client.get_tushare_pro", lambda: CalendarPro())
+    monkeypatch.setattr("a_breakout_screener.tushare_client.create_tushare_pro", lambda: DailyPro())
+
+    result = data._fetch_tushare_daily_range(date(2026, 1, 1), date(2026, 1, 6), tmp_path, max_workers=4)
+
+    assert result["date"].dt.strftime("%Y%m%d").tolist() == trade_dates
+    assert set(result["code"]) == {"000001"}
+    for trade_date in trade_dates:
+        assert (tmp_path / "tushare_daily" / f"{trade_date}.csv").exists()
+
+
 def test_fetch_stock_tags_filters_generic_tags_and_uses_cache(monkeypatch, tmp_path) -> None:
     class FakePro:
         def __init__(self) -> None:

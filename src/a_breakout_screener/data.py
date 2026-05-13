@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
+from pathlib import Path
+import threading
+import time
 import warnings
 from datetime import date, timedelta
 import json
-import os
-from pathlib import Path
-import time
 
 import pandas as pd
 
@@ -49,6 +51,7 @@ DEFAULT_TUSHARE_RETRY_DELAY = 2.0
 DEFAULT_TUSHARE_RETRY_MAX_DELAY = 15.0
 DEFAULT_TAG_CACHE_DAYS = 30
 DEFAULT_FINANCIAL_CACHE_DAYS = 30
+DEFAULT_TUSHARE_DAILY_WORKERS = 4
 MAX_STOCK_TAGS = 8
 GENERIC_CONCEPT_TAGS = {
     "AB股",
@@ -73,6 +76,7 @@ GENERIC_CONCEPT_TAGS = {
     "证金持股",
     "转融券标的",
 }
+_TUSHARE_THREAD_LOCAL = threading.local()
 
 
 def fetch_spot() -> pd.DataFrame:
@@ -214,6 +218,7 @@ def prepare_history_cache(
     end_date: date,
     cache_dir: Path,
     force_refresh: bool = False,
+    max_workers: int = 1,
 ) -> tuple[int, int]:
     if not _tushare_enabled() or not symbols:
         return 0, 0
@@ -242,7 +247,7 @@ def prepare_history_cache(
     if not needs:
         return 0, 0
 
-    daily = _fetch_tushare_daily_range(min(needs.values()), end_date, cache_dir)
+    daily = _fetch_tushare_daily_range(min(needs.values()), end_date, cache_dir, max_workers=max_workers)
     if daily.empty:
         return len(needs), 0
 
@@ -380,7 +385,12 @@ def _latest_tushare_daily(pro, end_date: date) -> tuple[str, pd.DataFrame]:
     raise RuntimeError("Tushare daily returned no rows for recent open trading days")
 
 
-def _fetch_tushare_daily_range(start_date: date, end_date: date, cache_dir: Path) -> pd.DataFrame:
+def _fetch_tushare_daily_range(
+    start_date: date,
+    end_date: date,
+    cache_dir: Path,
+    max_workers: int = 1,
+) -> pd.DataFrame:
     from .tushare_client import get_tushare_pro
 
     pro = get_tushare_pro()
@@ -399,24 +409,75 @@ def _fetch_tushare_daily_range(start_date: date, end_date: date, cache_dir: Path
     date_cache_dir = cache_dir / "tushare_daily"
     date_cache_dir.mkdir(parents=True, exist_ok=True)
     trade_dates = sorted(str(item) for item in calendar["cal_date"].dropna().tolist())
-    frames: list[pd.DataFrame] = []
+    frames: list[tuple[str, pd.DataFrame]] = []
     total = len(trade_dates)
-    for idx, trade_date in enumerate(trade_dates, start=1):
-        cache_path = date_cache_dir / f"{trade_date}.csv"
-        if cache_path.exists():
-            daily = _read_history_cache(cache_path)
-        else:
-            daily = _fetch_tushare_daily_with_retry(pro, trade_date)
-            if not daily.empty:
-                daily.to_csv(cache_path, index=False)
-            time.sleep(0.15)
-        if daily is not None and not daily.empty:
-            frames.append(daily)
-        if idx == 1 or idx % 25 == 0 or idx == total:
-            print(f"Tushare历史缓存: {idx}/{total} 个交易日", flush=True)
+    workers = _resolve_tushare_daily_workers(max_workers)
+    if workers > 1:
+        print(f"Tushare历史缓存: 使用 {workers} 线程缓存 {total} 个交易日", flush=True)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(_load_or_fetch_tushare_daily, trade_date, date_cache_dir): trade_date
+                for trade_date in trade_dates
+            }
+            for idx, future in enumerate(as_completed(futures), start=1):
+                trade_date = futures[future]
+                try:
+                    daily = future.result()
+                except Exception as exc:  # pragma: no cover - external network variance
+                    warnings.warn(f"Tushare daily failed for {trade_date}; skipped: {exc}", RuntimeWarning)
+                    daily = pd.DataFrame()
+                if daily is not None and not daily.empty:
+                    frames.append((trade_date, daily))
+                if idx == 1 or idx % 25 == 0 or idx == total:
+                    print(f"Tushare历史缓存: {idx}/{total} 个交易日", flush=True)
+    else:
+        pro = get_tushare_pro()
+        for idx, trade_date in enumerate(trade_dates, start=1):
+            daily = _load_or_fetch_tushare_daily(trade_date, date_cache_dir, pro=pro)
+            if daily is not None and not daily.empty:
+                frames.append((trade_date, daily))
+            if idx == 1 or idx % 25 == 0 or idx == total:
+                print(f"Tushare历史缓存: {idx}/{total} 个交易日", flush=True)
     if not frames:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+    return pd.concat([frame for _, frame in sorted(frames, key=lambda item: item[0])], ignore_index=True)
+
+
+def _resolve_tushare_daily_workers(configured_workers: int) -> int:
+    default = max(1, min(DEFAULT_TUSHARE_DAILY_WORKERS, int(configured_workers or 1)))
+    return max(1, _env_int("TUSHARE_DAILY_WORKERS", default))
+
+
+def _load_or_fetch_tushare_daily(
+    trade_date: str,
+    date_cache_dir: Path,
+    pro=None,
+) -> pd.DataFrame:
+    cache_path = date_cache_dir / f"{trade_date}.csv"
+    if cache_path.exists():
+        return _read_history_cache(cache_path)
+
+    daily = _fetch_tushare_daily_with_retry(pro or _get_thread_tushare_pro(), trade_date)
+    if not daily.empty:
+        _write_daily_cache_atomic(cache_path, daily)
+    time.sleep(_env_float("TUSHARE_DAILY_FETCH_DELAY", 0.05))
+    return daily
+
+
+def _get_thread_tushare_pro():
+    from .tushare_client import create_tushare_pro
+
+    pro = getattr(_TUSHARE_THREAD_LOCAL, "pro", None)
+    if pro is None:
+        pro = create_tushare_pro()
+        _TUSHARE_THREAD_LOCAL.pro = pro
+    return pro
+
+
+def _write_daily_cache_atomic(cache_path: Path, daily: pd.DataFrame) -> None:
+    tmp_path = cache_path.with_name(f".{cache_path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    daily.to_csv(tmp_path, index=False)
+    os.replace(tmp_path, cache_path)
 
 
 def _fetch_tushare_daily_with_retry(pro, trade_date: str) -> pd.DataFrame:

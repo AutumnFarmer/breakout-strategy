@@ -11,6 +11,7 @@ from typing import Any
 class ScreenerConfig:
     top_n: int = 20
     max_workers: int = 6
+    history_cache_workers: int = 4
     history_days: int = 1300
     resistance_lookback_weeks: int = 156
     resistance_exclude_recent_weeks: int = 4
@@ -118,6 +119,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     screener = ScreenerConfig(
         top_n=int(screener_raw.get("top_n", 20)),
         max_workers=int(screener_raw.get("max_workers", 6)),
+        history_cache_workers=int(screener_raw.get("history_cache_workers", 4)),
         history_days=int(screener_raw.get("history_days", 1300)),
         resistance_lookback_weeks=int(screener_raw.get("resistance_lookback_weeks", 156)),
         resistance_exclude_recent_weeks=int(screener_raw.get("resistance_exclude_recent_weeks", 4)),

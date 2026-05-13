@@ -86,6 +86,7 @@ def run_scan(
         end_date=end_date,
         cache_dir=config.paths.cache_dir,
         force_refresh=force_refresh,
+        max_workers=config.screener.history_cache_workers,
     )
 
     candidates: list[Candidate] = []

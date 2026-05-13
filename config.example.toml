@@ -1,6 +1,7 @@
 [screener]
 top_n = 20
 max_workers = 6
+history_cache_workers = 4
 history_days = 1300
 resistance_lookback_weeks = 156
 resistance_exclude_recent_weeks = 4
