@@ -14,7 +14,7 @@ import pandas as pd
 from .config import AppConfig
 from .data import _normalize_history
 from .models import Candidate
-from .scoring import _to_weekly, _weekly_span_mean, assess_candidate, calc_resistance
+from .scoring import _to_weekly, _weekly_span_mean, assess_candidate, calc_pressure_zone
 
 
 @dataclass(frozen=True)
@@ -99,6 +99,7 @@ def run_backtest(
                 holding_days=holding_days,
                 max_top_n=max_top_n,
                 max_holding=max_holding,
+                trading_dates=trading_dates,
             )
             trades.extend(day_trades)
             filter_rows.append({"signal_date": signal_ts.date().isoformat(), "total_checked": checked, "passed": passed})
@@ -116,6 +117,7 @@ def run_backtest(
                     holding_days=holding_days,
                     max_top_n=max_top_n,
                     max_holding=max_holding,
+                    trading_dates=trading_dates,
                 ): idx
                 for idx, signal_ts in enumerate(signal_dates, start=1)
             }
@@ -298,6 +300,7 @@ def run_first_signal_executable_backtest(
     lookback_days: int = 365,
     lot_size: int = 100,
     max_capital_per_trade: float = 5000.0,
+    max_total_capital: float = 0.0,
     min_capital_per_trade: float = 0.0,
     max_buys_per_day: int = 3,
     max_theme_buys_per_day: int = 2,
@@ -329,6 +332,7 @@ def run_first_signal_executable_backtest(
         lookback_days=lookback_days,
         lot_size=lot_size,
         max_capital_per_trade=max_capital_per_trade,
+        max_total_capital=max_total_capital,
         min_capital_per_trade=min_capital_per_trade,
         max_buys_per_day=max_buys_per_day,
         max_theme_buys_per_day=max_theme_buys_per_day,
@@ -343,6 +347,7 @@ def run_first_signal_executable_backtest(
         trading_dates=trading_dates,
         lot_size=lot_size,
         max_capital_per_trade=max_capital_per_trade,
+        max_total_capital=max_total_capital,
         min_capital_per_trade=min_capital_per_trade,
         max_buys_per_day=max_buys_per_day,
         max_theme_buys_per_day=max_theme_buys_per_day,
@@ -407,9 +412,11 @@ def _backtest_signal_date(
     holding_days: tuple[int, ...],
     max_top_n: int,
     max_holding: int,
+    trading_dates: list[pd.Timestamp] | None = None,
 ) -> tuple[list[dict[str, Any]], int, int]:
     total_checked = 0
     daily_candidates: list[tuple[Candidate, pd.DataFrame, int]] = []
+    week_confirmed = _is_backtest_week_confirmed(signal_ts, trading_dates or [])
     for prepared in prepared_histories:
         history = prepared.history
         pos = history["date"].searchsorted(signal_ts, side="right") - 1
@@ -425,7 +432,7 @@ def _backtest_signal_date(
         if _finite_float(latest.get("close")) < config.screener.min_price:
             continue
         total_checked += 1
-        candidate = _evaluate_prepared_at_pos(prepared, pos, config)
+        candidate = _evaluate_prepared_at_pos(prepared, pos, config, is_week_confirmed=week_confirmed)
         if candidate:
             daily_candidates.append((candidate, history, pos))
 
@@ -494,6 +501,7 @@ def _run_long_hold_backtest(
                 top_n=top_n,
                 capital_per_trade=capital_per_trade,
                 stop_loss_pct=stop_loss_pct,
+                trading_dates=trading_dates,
             )
             trades.extend(day_trades)
             filter_rows.append({"signal_date": signal_ts.date().isoformat(), "total_checked": checked, "passed": passed})
@@ -512,6 +520,7 @@ def _run_long_hold_backtest(
                     top_n=top_n,
                     capital_per_trade=capital_per_trade,
                     stop_loss_pct=stop_loss_pct,
+                    trading_dates=trading_dates,
                 ): idx
                 for idx, signal_ts in enumerate(signal_dates, start=1)
             }
@@ -533,9 +542,11 @@ def _long_hold_signal_date(
     top_n: int,
     capital_per_trade: float,
     stop_loss_pct: float,
+    trading_dates: list[pd.Timestamp] | None = None,
 ) -> tuple[list[dict[str, Any]], int, int]:
     total_checked = 0
     daily_candidates: list[tuple[Candidate, pd.DataFrame, int]] = []
+    week_confirmed = _is_backtest_week_confirmed(signal_ts, trading_dates or [])
     for prepared in prepared_histories:
         history = prepared.history
         pos = history["date"].searchsorted(signal_ts, side="right") - 1
@@ -551,7 +562,7 @@ def _long_hold_signal_date(
         if _finite_float(latest.get("close")) < config.screener.min_price:
             continue
         total_checked += 1
-        candidate = _evaluate_prepared_at_pos(prepared, pos, config)
+        candidate = _evaluate_prepared_at_pos(prepared, pos, config, is_week_confirmed=week_confirmed)
         if candidate:
             daily_candidates.append((candidate, history, pos))
 
@@ -623,6 +634,7 @@ def _run_first_signal_backtest(
                 config=config,
                 capital_per_trade=capital_per_trade,
                 stop_loss_fraction=stop_loss_fraction,
+                trading_dates=trading_dates,
             )
             if trade:
                 trades.append(trade)
@@ -639,6 +651,7 @@ def _run_first_signal_backtest(
                     config=config,
                     capital_per_trade=capital_per_trade,
                     stop_loss_fraction=stop_loss_fraction,
+                    trading_dates=trading_dates,
                 ): prepared.code
                 for prepared in prepared_histories
             }
@@ -679,6 +692,7 @@ def _first_signal_for_stock(
     config: AppConfig,
     capital_per_trade: float,
     stop_loss_fraction: float,
+    trading_dates: list[pd.Timestamp] | None = None,
 ) -> dict[str, Any] | None:
     history = prepared.history
     start_pos = int(history["date"].searchsorted(start_ts, side="left"))
@@ -696,11 +710,7 @@ def _first_signal_for_stock(
         latest_ts = pd.Timestamp(latest["date"])
         week_key = str(latest_ts.to_period("W-FRI"))
         if week_key not in resistance_by_week:
-            resistance_by_week[week_key] = calc_resistance(
-                prepared.weekly,
-                latest_ts,
-                config.screener.resistance_lookback_weeks,
-            )
+            resistance_by_week[week_key] = _calc_configured_resistance(prepared.weekly, latest_ts, config.screener)
         resistance = resistance_by_week[week_key]
         if not resistance:
             continue
@@ -710,7 +720,14 @@ def _first_signal_for_stock(
         breakout_pct = close / resistance.resistance - 1
         if breakout_pct < config.screener.breakout_buffer or breakout_pct > config.screener.max_extension:
             continue
-        candidate = _evaluate_prepared_at_pos(prepared, pos, config, resistance=resistance)
+        week_confirmed = _is_backtest_week_confirmed(latest_ts, trading_dates or list(history["date"]))
+        candidate = _evaluate_prepared_at_pos(
+            prepared,
+            pos,
+            config,
+            resistance=resistance,
+            is_week_confirmed=week_confirmed,
+        )
         if not candidate or candidate.signal_type not in {"A", "B", "C", "C1", "C2"}:
             continue
 
@@ -760,9 +777,11 @@ def _first_signal_date(
     bought_codes: set[str],
     capital_per_trade: float,
     stop_loss_fraction: float,
+    trading_dates: list[pd.Timestamp] | None = None,
 ) -> tuple[list[dict[str, Any]], int, int]:
     total_checked = 0
     daily_candidates: list[tuple[Candidate, pd.DataFrame, int]] = []
+    week_confirmed = _is_backtest_week_confirmed(signal_ts, trading_dates or [])
     for prepared in prepared_histories:
         if prepared.code in bought_codes:
             continue
@@ -780,7 +799,7 @@ def _first_signal_date(
         if _finite_float(latest.get("close")) < config.screener.min_price:
             continue
         total_checked += 1
-        candidate = _evaluate_prepared_at_pos(prepared, pos, config)
+        candidate = _evaluate_prepared_at_pos(prepared, pos, config, is_week_confirmed=week_confirmed)
         if candidate and candidate.signal_type in {"A", "B", "C", "C1", "C2"}:
             daily_candidates.append((candidate, history, pos))
 
@@ -843,6 +862,7 @@ def _run_first_signal_executable_backtest(
     slippage_bps: float,
     fee_bps: float,
     stop_loss_pct: float,
+    max_total_capital: float = 0.0,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if len(trading_dates) < config.screener.min_history_rows + 3:
         return [], []
@@ -850,21 +870,30 @@ def _run_first_signal_executable_backtest(
     start_ts = end_ts - pd.Timedelta(days=lookback_days)
     signal_dates = [ts for ts in trading_dates if ts >= start_ts and ts < end_ts]
     tag_map = _load_cached_tag_map(config.paths.cache_dir, {item.code for item in prepared_histories})
+    tag_cache_total = len(prepared_histories)
+    tag_cache_covered = len(tag_map)
     bought_codes: set[str] = set()
+    active_positions: list[tuple[pd.Timestamp, float]] = []
     trades: list[dict[str, Any]] = []
     filter_rows: list[dict[str, Any]] = []
     stop_loss_fraction = max(0.0, stop_loss_pct) / 100
     total = len(signal_dates)
     for idx, signal_ts in enumerate(signal_dates, start=1):
+        signal_day = pd.Timestamp(signal_ts).normalize()
+        active_positions = [(exit_ts, cash) for exit_ts, cash in active_positions if exit_ts > signal_day]
+        current_capital_used = sum(cash for _, cash in active_positions)
         day_trades, stats = _first_signal_executable_date(
             signal_ts=signal_ts,
             end_ts=end_ts,
+            trading_dates=trading_dates,
             prepared_histories=prepared_histories,
             config=config,
             bought_codes=bought_codes,
             tag_map=tag_map,
             lot_size=lot_size,
             max_capital_per_trade=max_capital_per_trade,
+            max_total_capital=max_total_capital,
+            current_capital_used=current_capital_used,
             min_capital_per_trade=min_capital_per_trade,
             max_buys_per_day=max_buys_per_day,
             max_theme_buys_per_day=max_theme_buys_per_day,
@@ -873,10 +902,20 @@ def _run_first_signal_executable_backtest(
             stop_loss_fraction=stop_loss_fraction,
         )
         trades.extend(day_trades)
+        for trade in day_trades:
+            active_positions.append(
+                (
+                    pd.Timestamp(trade["exit_date"]).normalize(),
+                    _finite_float(trade.get("capital_reserved")),
+                )
+            )
         filter_rows.append(
             {
                 "signal_date": signal_ts.date().isoformat(),
                 **stats,
+                "tag_cache_total": tag_cache_total,
+                "tag_cache_covered": tag_cache_covered,
+                "tag_cache_coverage_pct": round(tag_cache_covered / tag_cache_total * 100, 2) if tag_cache_total else 0.0,
                 "held_unique_codes": len(bought_codes),
             }
         )
@@ -900,9 +939,13 @@ def _first_signal_executable_date(
     slippage_bps: float,
     fee_bps: float,
     stop_loss_fraction: float,
+    max_total_capital: float = 0.0,
+    current_capital_used: float = 0.0,
+    trading_dates: list[pd.Timestamp] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     total_checked = 0
     daily_candidates: list[tuple[Candidate, pd.DataFrame, int]] = []
+    week_confirmed = _is_backtest_week_confirmed(signal_ts, trading_dates or [])
     for prepared in prepared_histories:
         if prepared.code in bought_codes:
             continue
@@ -920,7 +963,7 @@ def _first_signal_executable_date(
         if _finite_float(latest.get("close")) < config.screener.min_price:
             continue
         total_checked += 1
-        candidate = _evaluate_prepared_at_pos(prepared, pos, config)
+        candidate = _evaluate_prepared_at_pos(prepared, pos, config, is_week_confirmed=week_confirmed)
         if candidate:
             cached_tags = tag_map.get(candidate.code, ())
             if cached_tags and not candidate.tags:
@@ -928,9 +971,12 @@ def _first_signal_executable_date(
             daily_candidates.append((candidate, history, pos))
 
     daily_candidates.sort(key=lambda item: _signal_sort_key(item[0]))
+    tagged_candidates = sum(1 for candidate, _, _ in daily_candidates if _primary_tag(candidate))
     stats: dict[str, Any] = {
         "total_checked": total_checked,
         "raw_candidates": len(daily_candidates),
+        "raw_tagged_candidates": tagged_candidates,
+        "raw_untagged_candidates": len(daily_candidates) - tagged_candidates,
         "passed": 0,
         "new_buys": 0,
         "skipped_unbuyable_signal_type": 0,
@@ -938,8 +984,12 @@ def _first_signal_executable_date(
         "skipped_theme_limit": 0,
         "skipped_one_lot_too_expensive": 0,
         "skipped_below_min_capital": 0,
+        "skipped_total_capital_limit": 0,
         "skipped_invalid_price": 0,
         "theme_limit_applied": False,
+        "capital_used_before": round(current_capital_used, 2),
+        "capital_used_after": round(current_capital_used, 2),
+        "max_total_capital": round(max_total_capital, 2),
     }
     trades: list[dict[str, Any]] = []
     theme_buys: dict[str, int] = {}
@@ -947,6 +997,8 @@ def _first_signal_executable_date(
     theme_limit = max(0, int(max_theme_buys_per_day))
     slip = max(0.0, slippage_bps) / 10000
     fee = max(0.0, fee_bps) / 10000
+    day_capital_used = max(0.0, current_capital_used)
+    capital_limit = max(0.0, max_total_capital)
     for signal_rank, (candidate, history, pos) in enumerate(daily_candidates, start=1):
         signal_type = candidate.signal_type
         if signal_type not in EXECUTABLE_BUY_SIGNAL_TYPES:
@@ -997,9 +1049,13 @@ def _first_signal_executable_date(
 
         exit_value = shares * effective_exit_price
         buy_fee = invested * fee
+        cash_needed = invested + buy_fee
+        if capital_limit > 0 and day_capital_used + cash_needed > capital_limit:
+            stats["skipped_total_capital_limit"] += 1
+            continue
         sell_fee = exit_value * fee
         pnl = exit_value - invested - buy_fee - sell_fee
-        ret = pnl / invested if invested > 0 else 0.0
+        ret = pnl / cash_needed if cash_needed > 0 else 0.0
         trade = {
             "signal_date": signal_ts.date().isoformat(),
             "entry_date": pd.Timestamp(entry_row["date"]).date().isoformat(),
@@ -1026,6 +1082,7 @@ def _first_signal_executable_date(
             "shares": int(shares),
             "lots": int(shares // lot_size) if lot_size > 0 else 0,
             "invested": round(invested, 2),
+            "capital_reserved": round(cash_needed, 2),
             "exit_value": round(exit_value, 2),
             "buy_fee": round(buy_fee, 2),
             "sell_fee": round(sell_fee, 2),
@@ -1040,8 +1097,10 @@ def _first_signal_executable_date(
         bought_codes.add(candidate.code)
         if primary_tag:
             theme_buys[primary_tag] = theme_buys.get(primary_tag, 0) + 1
+        day_capital_used += cash_needed
         trades.append(trade)
         stats["new_buys"] += 1
+        stats["capital_used_after"] = round(day_capital_used, 2)
     return trades, stats
 
 
@@ -1109,9 +1168,19 @@ def _prepare_history(code: str, name: str, history: pd.DataFrame, ma_trend_perio
     prepared["ma10"] = prepared["close"].rolling(10).mean()
     prepared["ma20"] = prepared["close"].rolling(20).mean()
 
-    volume_baseline = prepared["volume"].shift(1).rolling(19).mean()
-    prepared["bt_volume_ratio"] = prepared["volume"] / volume_baseline
-    prepared["bt_volume_trend"] = prepared["volume"].rolling(5).mean() / volume_baseline
+    volume = pd.to_numeric(prepared.get("volume", pd.Series(0.0, index=prepared.index)), errors="coerce").fillna(0.0)
+    amount = pd.to_numeric(prepared.get("amount", pd.Series(0.0, index=prepared.index)), errors="coerce").fillna(0.0)
+    volume_baseline = volume.shift(1).rolling(19).mean()
+    amount_baseline = amount.shift(1).rolling(19).mean()
+    volume_ratio = volume / volume_baseline
+    amount_ratio = amount / amount_baseline
+    volume_trend = volume.rolling(5).mean() / volume_baseline
+    amount_trend = amount.rolling(5).mean() / amount_baseline
+    use_amount = (amount > 0) & (amount_baseline > 0)
+    prepared["bt_volume_ratio"] = amount_ratio.where(use_amount, volume_ratio)
+    prepared["bt_volume_trend"] = amount_trend.where(use_amount, volume_trend)
+    prepared["bt_activity_source"] = "volume"
+    prepared.loc[use_amount, "bt_activity_source"] = "amount"
 
     prev_close = prepared["close"].shift(1)
     tr = pd.concat(
@@ -1177,7 +1246,40 @@ def _monthly_span_series(daily: pd.DataFrame, months: int = 12, trading_rows: in
     return pd.Series(values, index=daily.index)
 
 
-def _evaluate_prepared_at_pos(prepared: PreparedHistory, pos: int, config: AppConfig, resistance: Any | None = None) -> Candidate | None:
+def _calc_configured_resistance(weekly: pd.DataFrame, latest_trade_ts: pd.Timestamp, params: Any) -> Any | None:
+    return calc_pressure_zone(
+        weekly=weekly,
+        latest_trade_ts=latest_trade_ts,
+        lookback_weeks=params.resistance_lookback_weeks,
+        exclude_recent_weeks=params.resistance_exclude_recent_weeks,
+        pivot_k=params.pivot_k,
+        cluster_tolerance=params.cluster_tolerance,
+        touch_tolerance=params.touch_tolerance,
+        min_touches=params.min_touches,
+        min_touch_gap_weeks=params.min_touch_gap_weeks,
+        min_span_weeks=params.min_span_weeks,
+        effective_breakout_pct=params.effective_breakout_pct,
+    )
+
+
+def _is_backtest_week_confirmed(trade_ts: pd.Timestamp, trading_dates: list[pd.Timestamp]) -> bool:
+    ts = pd.Timestamp(trade_ts).normalize()
+    if not trading_dates:
+        return ts.weekday() == 4
+    normalized = [pd.Timestamp(item).normalize() for item in trading_dates]
+    same_week = [item for item in normalized if item.to_period("W-FRI") == ts.to_period("W-FRI")]
+    if not same_week:
+        return ts.weekday() == 4
+    return ts == max(same_week)
+
+
+def _evaluate_prepared_at_pos(
+    prepared: PreparedHistory,
+    pos: int,
+    config: AppConfig,
+    resistance: Any | None = None,
+    is_week_confirmed: bool = False,
+) -> Candidate | None:
     params = config.screener
     history = prepared.history
     latest = history.iloc[pos]
@@ -1187,7 +1289,7 @@ def _evaluate_prepared_at_pos(prepared: PreparedHistory, pos: int, config: AppCo
         return None
 
     if resistance is None:
-        resistance = calc_resistance(prepared.weekly, latest["date"], params.resistance_lookback_weeks)
+        resistance = _calc_configured_resistance(prepared.weekly, latest["date"], params)
     if not resistance:
         return None
 
@@ -1197,9 +1299,11 @@ def _evaluate_prepared_at_pos(prepared: PreparedHistory, pos: int, config: AppCo
     ma_trend = _finite_float(latest.get("ma_trend"), float("nan"))
     volume_ratio = _finite_float(latest.get("bt_volume_ratio"))
     volume_trend = _finite_float(latest.get("bt_volume_trend"))
+    activity_source = str(latest.get("bt_activity_source") or "")
     monthly_span_pct = _finite_float(latest.get("bt_monthly_span_pct"))
     atr_pct = _finite_float(latest.get("bt_atr_pct"))
     weekly_span_mean = _weekly_span_mean(prepared.weekly, params.consolidation_weeks, latest["date"]) if params.consolidation_weeks > 0 else 0.0
+    recent_low = _finite_float(history["low"].iloc[max(0, pos - 19) : pos + 1].min())
 
     confirmation_closes: list[float] = []
     if params.confirmation_bars > 0:
@@ -1213,21 +1317,28 @@ def _evaluate_prepared_at_pos(prepared: PreparedHistory, pos: int, config: AppCo
         close=close,
         open_=open_,
         resistance=resistance.resistance,
+        zone_low=getattr(resistance, "zone_low", resistance.resistance),
+        zone_mid=getattr(resistance, "zone_mid", resistance.resistance),
+        zone_upper=getattr(resistance, "zone_upper", resistance.resistance),
         resistance_touches=resistance.touches,
         resistance_cluster_size=resistance.cluster_size,
+        span_weeks=getattr(resistance, "span_weeks", 0),
         breakout_pct=breakout_pct,
         ma10=ma10,
         ma20=ma20,
         ma_trend=ma_trend,
         volume_ratio=volume_ratio,
         volume_trend=volume_trend,
+        activity_source=activity_source,
         monthly_span_pct=monthly_span_pct,
         weekly_span_mean=weekly_span_mean,
         atr_pct=atr_pct,
+        recent_low=recent_low,
         first_resistance_date=resistance.first_touch_date,
         last_resistance_date=resistance.last_touch_date,
         latest_trade_date=pd.Timestamp(latest["date"]).date(),
         confirmation_closes=confirmation_closes,
+        is_week_confirmed=is_week_confirmed,
         params=params,
     )
 
@@ -1354,6 +1465,7 @@ def _summarize_long_hold(
                     **base,
                     "trades": 0,
                     "total_invested": 0.0,
+                    "total_cash_invested": 0.0,
                     "ending_value": 0.0,
                     "total_pnl": 0.0,
                     "total_return_pct": 0.0,
@@ -1424,6 +1536,7 @@ def _summarize_first_signal(
                     **base,
                     "trades": 0,
                     "total_invested": 0.0,
+                    "total_cash_invested": 0.0,
                     "ending_value": 0.0,
                     "total_pnl": 0.0,
                     "total_return_pct": 0.0,
@@ -1479,6 +1592,7 @@ def _summarize_first_signal_executable(
     stop_loss_pct: float,
     start_date: str,
     end_date: str,
+    max_total_capital: float = 0.0,
 ) -> pd.DataFrame:
     signal_days = len(first_signal_filter_rows)
     days_with_candidates = sum(1 for row in first_signal_filter_rows if int(row.get("raw_candidates", 0)) > 0)
@@ -1487,6 +1601,11 @@ def _summarize_first_signal_executable(
     skipped_daily_limit = sum(int(row.get("skipped_daily_limit", 0)) for row in first_signal_filter_rows)
     skipped_theme_limit = sum(int(row.get("skipped_theme_limit", 0)) for row in first_signal_filter_rows)
     skipped_below_min = sum(int(row.get("skipped_below_min_capital", 0)) for row in first_signal_filter_rows)
+    skipped_capital_limit = sum(int(row.get("skipped_total_capital_limit", 0)) for row in first_signal_filter_rows)
+    raw_candidates = sum(int(row.get("raw_candidates", 0)) for row in first_signal_filter_rows)
+    tagged_candidates = sum(int(row.get("raw_tagged_candidates", 0)) for row in first_signal_filter_rows)
+    tag_cache_total = max((int(row.get("tag_cache_total", 0)) for row in first_signal_filter_rows), default=0)
+    tag_cache_covered = max((int(row.get("tag_cache_covered", 0)) for row in first_signal_filter_rows), default=0)
     theme_limit_applied = any(bool(row.get("theme_limit_applied")) for row in first_signal_filter_rows)
     base = {
         "start_date": start_date,
@@ -1498,6 +1617,7 @@ def _summarize_first_signal_executable(
         "max_theme_buys_per_day": int(max_theme_buys_per_day),
         "lot_size": int(lot_size),
         "max_capital_per_trade": round(max_capital_per_trade, 2),
+        "max_total_capital": round(max_total_capital, 2),
         "min_capital_per_trade": round(min_capital_per_trade, 2),
         "slippage_bps": round(slippage_bps, 4),
         "fee_bps": round(fee_bps, 4),
@@ -1510,6 +1630,12 @@ def _summarize_first_signal_executable(
         "skipped_daily_limit": skipped_daily_limit,
         "skipped_theme_limit": skipped_theme_limit,
         "skipped_below_min_capital": skipped_below_min,
+        "skipped_total_capital_limit": skipped_capital_limit,
+        "tag_cache_total": tag_cache_total,
+        "tag_cache_covered": tag_cache_covered,
+        "tag_cache_coverage_pct": round(tag_cache_covered / tag_cache_total * 100, 2) if tag_cache_total else 0.0,
+        "tagged_first_signal_candidates": tagged_candidates,
+        "tag_candidate_coverage_pct": round(tagged_candidates / raw_candidates * 100, 2) if raw_candidates else 0.0,
     }
     if trades_df.empty:
         return pd.DataFrame(
@@ -1545,6 +1671,7 @@ def _summarize_first_signal_executable(
     returns = trades_df["return_pct"].astype(float)
     stopped = trades_df["exit_reason"].eq("stop_loss")
     total_invested = float(invested.sum())
+    total_cash_invested = float((invested + buy_fee).sum())
     ending_value = float((exit_value - sell_fee).sum())
     total_pnl = float(pnl.sum())
     max_concurrent_positions, peak_capital_used = _capital_usage_metrics(trades_df, trading_dates)
@@ -1554,9 +1681,10 @@ def _summarize_first_signal_executable(
                 **base,
                 "trades": int(len(trades_df)),
                 "total_invested": round(total_invested, 2),
+                "total_cash_invested": round(total_cash_invested, 2),
                 "ending_value": round(ending_value, 2),
                 "total_pnl": round(total_pnl, 2),
-                "total_return_pct": round(total_pnl / total_invested * 100 if total_invested > 0 else 0.0, 3),
+                "total_return_pct": round(total_pnl / total_cash_invested * 100 if total_cash_invested > 0 else 0.0, 3),
                 "win_rate_pct": round(float((returns > 0).mean() * 100), 2),
                 "stopped_trades": int(stopped.sum()),
                 "stop_loss_rate_pct": round(float(stopped.mean() * 100), 2),
@@ -1659,13 +1787,13 @@ def _html_report_title(report_mode: str) -> str:
 
 def _html_first_signal_note(report_mode: str) -> str:
     if report_mode == "first_signal_executable":
-        return "口径：first-signal executable backtest，按交易日回放 A/B/C1 首次信号，下一交易日开盘按整手买入；限制每日限流和题材限额，计入滑点、费率和峰值资金占用，持有到最新交易日或触发设定止损。"
+        return "口径：first-signal executable backtest，按交易日回放 A/B/C1 首次信号，下一交易日开盘按整手买入；限制每日限流、题材限额和可选总资金上限，计入滑点、费率、标签覆盖率和峰值资金占用，持有到最新交易日或触发设定止损。"
     return "口径：从一年前开始逐个交易日回放策略信号，A/B/C 类首次出现则下一交易日开盘按固定金额研究口径买入；同一股票后续重复信号不重复买入，持有到最新交易日或触发设定止损。该口径用于信号收益研究，不代表实盘成交。"
 
 
 def _html_first_signal_summary_header(report_mode: str) -> str:
     if report_mode == "first_signal_executable":
-        return "<thead><tr><th>区间</th><th>单票上限</th><th>一手</th><th>每日限流</th><th>题材限额</th><th>滑点bps</th><th>费率bps</th><th>止损</th><th>信号日</th><th>有候选日</th><th>首次候选</th><th>买入数</th><th>总投入</th><th>期末/止损后市值</th><th>总收益</th><th>总收益率</th><th>胜率</th><th>止损数</th><th>止损率</th><th>峰值资金占用</th></tr></thead>"
+        return "<thead><tr><th>区间</th><th>单票上限</th><th>总资金上限</th><th>一手</th><th>每日限流</th><th>题材限额</th><th>滑点bps</th><th>费率bps</th><th>止损</th><th>信号日</th><th>有候选日</th><th>首次候选</th><th>标签覆盖</th><th>买入数</th><th>总投入</th><th>现金投入</th><th>期末/止损后市值</th><th>总收益</th><th>总收益率</th><th>胜率</th><th>止损数</th><th>止损率</th><th>资金跳过</th><th>峰值资金占用</th></tr></thead>"
     return "<thead><tr><th>区间</th><th>单只买入</th><th>止损</th><th>信号日</th><th>有候选日</th><th>首次候选</th><th>买入数</th><th>总投入</th><th>期末/止损后市值</th><th>总收益</th><th>总收益率</th><th>胜率</th><th>止损数</th><th>止损率</th></tr></thead>"
 
 
@@ -1673,6 +1801,7 @@ def _html_first_signal_summary_cells(report_mode: str) -> str:
     if report_mode == "first_signal_executable":
         return """          cell(`${row.start_date} ~ ${row.end_date}`),
           cell(fmt(row.max_capital_per_trade ?? row.capital_per_trade, 0)),
+          cell(row.max_total_capital ? fmt(row.max_total_capital, 0) : "不限"),
           cell(row.lot_size ?? "-"),
           cell(row.max_buys_per_day ?? "-"),
           cell(row.max_theme_buys_per_day ?? "-"),
@@ -1682,14 +1811,17 @@ def _html_first_signal_summary_cells(report_mode: str) -> str:
           cell(row.signal_days),
           cell(row.days_with_candidates),
           cell(row.raw_first_signal_candidates),
+          cell(`${fmt(row.tag_candidate_coverage_pct ?? 0)}%`),
           cell(row.trades),
           cell(fmt(row.total_invested, 2)),
+          cell(fmt(row.total_cash_invested ?? row.total_invested, 2)),
           cell(fmt(row.ending_value, 2)),
           money(row.total_pnl),
           signed(row.total_return_pct),
           cell(`${fmt(row.win_rate_pct)}%`),
           cell(row.stopped_trades),
           cell(`${fmt(row.stop_loss_rate_pct)}%`),
+          cell(row.skipped_total_capital_limit ?? 0),
           cell(fmt(row.peak_capital_used ?? 0, 2))"""
     return """          cell(`${row.start_date} ~ ${row.end_date}`),
           cell(fmt(row.capital_per_trade, 0)),

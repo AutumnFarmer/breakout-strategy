@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .config import AppConfig, load_config
 from .emailer import send_report, validate_email_transport
-from .backtest import run_backtest, run_first_signal_executable_backtest
+from .backtest import run_backtest, run_first_signal_backtest, run_first_signal_executable_backtest
 from .screener import run_scan
 
 
@@ -28,6 +28,8 @@ def main(argv: list[str] | None = None) -> int:
         return _backtest(args, config)
     if args.command == "backtest-first-signal":
         return _backtest_first_signal(args, config)
+    if args.command == "backtest-first-signal-executable":
+        return _backtest_first_signal_executable(args, config)
 
     parser.print_help()
     return 2
@@ -61,19 +63,27 @@ def _build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--capital-per-trade", type=float, default=1000.0, help="Capital per selected stock in long-hold backtest")
     backtest.add_argument("--stop-loss-pct", type=float, default=50.0, help="Stop loss percent for long-hold backtest")
 
-    first_signal = sub.add_parser("backtest-first-signal", help="Run executable first-signal buy-once backtest")
+    first_signal = sub.add_parser("backtest-first-signal", help="Run fixed-amount first-signal research backtest")
     first_signal.add_argument("--symbols", default="", help="Comma separated stock codes for a focused backtest")
     first_signal.add_argument("--workers", type=int, default=0, help="Override worker threads for this run")
     first_signal.add_argument("--lookback-days", type=int, default=365, help="Lookback calendar days, default: 365")
-    first_signal.add_argument("--lot-size", type=int, default=100, help="Round-lot size, default: 100")
-    first_signal.add_argument("--max-capital-per-trade", type=float, default=5000.0, help="Maximum cash per stock, default: 5000")
-    first_signal.add_argument("--min-capital-per-trade", type=float, default=0.0, help="Minimum invested cash per stock, default: 0")
-    first_signal.add_argument("--max-buys-per-day", type=int, default=3, help="Maximum new buys per signal day, default: 3")
-    first_signal.add_argument("--max-theme-buys-per-day", type=int, default=2, help="Maximum buys per primary tag per day, default: 2")
-    first_signal.add_argument("--slippage-bps", type=float, default=10.0, help="Entry/exit slippage in basis points, default: 10")
-    first_signal.add_argument("--fee-bps", type=float, default=3.0, help="Buy/sell fee rate in basis points, default: 3")
-    first_signal.add_argument("--capital-per-trade", type=float, default=None, help=argparse.SUPPRESS)
+    first_signal.add_argument("--capital-per-trade", type=float, default=1000.0, help="Capital per first signal, default: 1000")
     first_signal.add_argument("--stop-loss-pct", type=float, default=30.0, help="Stop loss percent, default: 30")
+
+    executable = sub.add_parser("backtest-first-signal-executable", help="Run executable first-signal buy-once backtest")
+    executable.add_argument("--symbols", default="", help="Comma separated stock codes for a focused backtest")
+    executable.add_argument("--workers", type=int, default=0, help="Override worker threads for this run")
+    executable.add_argument("--lookback-days", type=int, default=365, help="Lookback calendar days, default: 365")
+    executable.add_argument("--lot-size", type=int, default=100, help="Round-lot size, default: 100")
+    executable.add_argument("--max-capital-per-trade", type=float, default=5000.0, help="Maximum cash per stock, default: 5000")
+    executable.add_argument("--max-total-capital", type=float, default=0.0, help="Maximum total reserved cash, default: 0 means unlimited")
+    executable.add_argument("--min-capital-per-trade", type=float, default=0.0, help="Minimum invested cash per stock, default: 0")
+    executable.add_argument("--max-buys-per-day", type=int, default=3, help="Maximum new buys per signal day, default: 3")
+    executable.add_argument("--max-theme-buys-per-day", type=int, default=2, help="Maximum buys per primary tag per day, default: 2")
+    executable.add_argument("--slippage-bps", type=float, default=10.0, help="Entry/exit slippage in basis points, default: 10")
+    executable.add_argument("--fee-bps", type=float, default=3.0, help="Buy/sell fee rate in basis points, default: 3")
+    executable.add_argument("--capital-per-trade", type=float, default=None, help=argparse.SUPPRESS)
+    executable.add_argument("--stop-loss-pct", type=float, default=30.0, help="Stop loss percent, default: 30")
     return parser
 
 
@@ -139,6 +149,27 @@ def _backtest(args: argparse.Namespace, config: AppConfig) -> int:
 def _backtest_first_signal(args: argparse.Namespace, config: AppConfig) -> int:
     if args.workers and args.workers > 0:
         config = replace(config, screener=replace(config.screener, max_workers=args.workers))
+    result = run_first_signal_backtest(
+        config=config,
+        lookback_days=max(1, args.lookback_days),
+        capital_per_trade=max(0.01, args.capital_per_trade),
+        stop_loss_pct=max(0.0, args.stop_loss_pct),
+        symbols={item.strip() for item in args.symbols.split(",") if item.strip()} or None,
+    )
+    print(
+        f"首次信号研究回测完成: {result.stock_count} 只股票，"
+        f"{result.signal_days} 个信号日，{result.trade_count} 笔买入"
+    )
+    print(f"首次信号交易: {result.trades_path}")
+    print(f"首次信号汇总: {result.summary_path}")
+    print(f"首次信号过滤: {result.filters_path}")
+    print(f"可视化: {result.html_path}")
+    return 0
+
+
+def _backtest_first_signal_executable(args: argparse.Namespace, config: AppConfig) -> int:
+    if args.workers and args.workers > 0:
+        config = replace(config, screener=replace(config.screener, max_workers=args.workers))
     max_capital_per_trade = args.max_capital_per_trade
     if args.capital_per_trade is not None:
         max_capital_per_trade = args.capital_per_trade
@@ -147,6 +178,7 @@ def _backtest_first_signal(args: argparse.Namespace, config: AppConfig) -> int:
         lookback_days=max(1, args.lookback_days),
         lot_size=max(1, args.lot_size),
         max_capital_per_trade=max(0.01, max_capital_per_trade),
+        max_total_capital=max(0.0, args.max_total_capital),
         min_capital_per_trade=max(0.0, args.min_capital_per_trade),
         max_buys_per_day=max(1, args.max_buys_per_day),
         max_theme_buys_per_day=max(0, args.max_theme_buys_per_day),
