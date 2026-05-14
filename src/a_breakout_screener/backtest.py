@@ -12,7 +12,7 @@ from typing import Any
 import pandas as pd
 
 from .config import AppConfig
-from .data import _normalize_history, fetch_trade_calendar, is_last_trade_day_of_week
+from .data import _normalize_history, _read_trade_calendar_cache, is_last_trade_day_of_week
 from .models import Candidate
 from .scoring import _to_weekly, _weekly_span_mean, assess_candidate, calc_pressure_zone
 
@@ -53,7 +53,8 @@ class PreparedHistory:
 
 
 SIGNAL_SORT_ORDER = {"A": 0, "B": 1, "C1": 2, "C2": 3, "C": 3, "D": 4}
-EXECUTABLE_BUY_SIGNAL_TYPES = {"A", "B"}
+DEFAULT_EXECUTABLE_BUY_SIGNAL_TYPES = ("A",)
+OBSERVATION_SIGNAL_TYPES = {"B", "C1", "C2", "C"}
 UNKNOWN_TAG = "UNKNOWN"
 
 
@@ -311,7 +312,10 @@ def run_first_signal_executable_backtest(
     max_theme_buys_per_day: int = 2,
     slippage_bps: float = 10.0,
     fee_bps: float = 3.0,
+    min_fee: float = 5.0,
+    sell_tax_bps: float = 5.0,
     stop_loss_pct: float = 30.0,
+    buy_signal_types: tuple[str, ...] = DEFAULT_EXECUTABLE_BUY_SIGNAL_TYPES,
     symbols: set[str] | None = None,
 ) -> FirstSignalBacktestResult:
     histories = _load_histories(config.paths.cache_dir, symbols=symbols)
@@ -344,7 +348,10 @@ def run_first_signal_executable_backtest(
         max_theme_buys_per_day=max_theme_buys_per_day,
         slippage_bps=slippage_bps,
         fee_bps=fee_bps,
+        min_fee=min_fee,
+        sell_tax_bps=sell_tax_bps,
         stop_loss_pct=stop_loss_pct,
+        buy_signal_types=buy_signal_types,
         calendar=calendar,
     )
     trades_df = pd.DataFrame(trades)
@@ -360,7 +367,10 @@ def run_first_signal_executable_backtest(
         max_theme_buys_per_day=max_theme_buys_per_day,
         slippage_bps=slippage_bps,
         fee_bps=fee_bps,
+        min_fee=min_fee,
+        sell_tax_bps=sell_tax_bps,
         stop_loss_pct=stop_loss_pct,
+        buy_signal_types=buy_signal_types,
         start_date=start_ts.date().isoformat(),
         end_date=end_ts.date().isoformat(),
     )
@@ -400,17 +410,23 @@ def run_first_signal_executable_backtest(
     )
 
 
-def calc_lot_position(entry_price: float, lot_size: int, max_capital: float, fee_rate: float = 0.0) -> tuple[int, float]:
+def calc_lot_position(
+    entry_price: float,
+    lot_size: int,
+    max_capital: float,
+    fee_rate: float = 0.0,
+    min_fee: float = 0.0,
+) -> tuple[int, float]:
     """Return shares and invested amount. If one lot exceeds max_capital, return (0, 0.0)."""
     if entry_price <= 0 or lot_size <= 0 or max_capital <= 0:
         return 0, 0.0
-    fee_multiplier = 1 + max(0.0, fee_rate)
-    one_lot_cost = entry_price * lot_size * fee_multiplier
-    if one_lot_cost > max_capital:
-        return 0, 0.0
-    lots = int(max_capital // one_lot_cost)
-    shares = lots * lot_size
-    return shares, shares * entry_price
+    max_lots = int(max_capital // (entry_price * lot_size))
+    for lots in range(max_lots, 0, -1):
+        shares = lots * lot_size
+        invested = shares * entry_price
+        if invested + _commission_fee(invested, fee_rate, min_fee) <= max_capital:
+            return shares, invested
+    return 0, 0.0
 
 
 def _backtest_signal_date(
@@ -872,7 +888,10 @@ def _run_first_signal_executable_backtest(
     slippage_bps: float,
     fee_bps: float,
     stop_loss_pct: float,
+    min_fee: float = 0.0,
+    sell_tax_bps: float = 0.0,
     max_total_capital: float = 0.0,
+    buy_signal_types: tuple[str, ...] = DEFAULT_EXECUTABLE_BUY_SIGNAL_TYPES,
     calendar: pd.DataFrame | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if len(trading_dates) < config.screener.min_history_rows + 3:
@@ -910,7 +929,10 @@ def _run_first_signal_executable_backtest(
             max_theme_buys_per_day=max_theme_buys_per_day,
             slippage_bps=slippage_bps,
             fee_bps=fee_bps,
+            min_fee=min_fee,
+            sell_tax_bps=sell_tax_bps,
             stop_loss_fraction=stop_loss_fraction,
+            buy_signal_types=buy_signal_types,
         )
         trades.extend(day_trades)
         for trade in day_trades:
@@ -949,7 +971,10 @@ def _first_signal_executable_date(
     max_theme_buys_per_day: int,
     slippage_bps: float,
     fee_bps: float,
+    min_fee: float,
+    sell_tax_bps: float,
     stop_loss_fraction: float,
+    buy_signal_types: tuple[str, ...],
     max_total_capital: float = 0.0,
     current_capital_used: float = 0.0,
     calendar: pd.DataFrame | None = None,
@@ -982,12 +1007,26 @@ def _first_signal_executable_date(
             daily_candidates.append((candidate, history, pos))
 
     daily_candidates.sort(key=lambda item: _signal_sort_key(item[0]))
-    tagged_candidates = sum(1 for candidate, _, _ in daily_candidates if _has_known_primary_tag(candidate))
+    signal_type_counts = _signal_type_counts(candidate for candidate, _, _ in daily_candidates)
+    buy_signal_set = {item.strip().upper() for item in buy_signal_types if item.strip()}
+    if not buy_signal_set:
+        buy_signal_set = set(DEFAULT_EXECUTABLE_BUY_SIGNAL_TYPES)
+    reportable_candidates = [
+        candidate for candidate, _, _ in daily_candidates
+        if str(candidate.signal_type or "D").upper() != "D"
+    ]
+    tagged_candidates = sum(1 for candidate in reportable_candidates if _has_known_primary_tag(candidate))
+    raw_buyable_candidates = sum(count for signal, count in signal_type_counts.items() if signal in buy_signal_set)
+    raw_observation_candidates = sum(count for signal, count in signal_type_counts.items() if signal in OBSERVATION_SIGNAL_TYPES - buy_signal_set)
+    raw_excluded_candidates = sum(count for signal, count in signal_type_counts.items() if signal == "D")
     stats: dict[str, Any] = {
         "total_checked": total_checked,
-        "raw_candidates": len(daily_candidates),
+        "raw_candidates": len(reportable_candidates),
+        "raw_buyable_candidates": raw_buyable_candidates,
+        "raw_observation_candidates": raw_observation_candidates,
+        "raw_excluded_candidates": raw_excluded_candidates,
         "raw_tagged_candidates": tagged_candidates,
-        "raw_untagged_candidates": len(daily_candidates) - tagged_candidates,
+        "raw_untagged_candidates": len(reportable_candidates) - tagged_candidates,
         "passed": 0,
         "new_buys": 0,
         "skipped_unbuyable_signal_type": 0,
@@ -1001,18 +1040,23 @@ def _first_signal_executable_date(
         "capital_used_before": round(current_capital_used, 2),
         "capital_used_after": round(current_capital_used, 2),
         "max_total_capital": round(max_total_capital, 2),
+        "buy_signal_types": "/".join(sorted(buy_signal_set)),
     }
+    for signal_type in ("A", "B", "C1", "C2", "C", "D"):
+        stats[f"raw_signal_{signal_type}"] = signal_type_counts.get(signal_type, 0)
     trades: list[dict[str, Any]] = []
     theme_buys: dict[str, int] = {}
-    max_buys = max(1, int(max_buys_per_day))
+    max_buys = max(0, int(max_buys_per_day))
     theme_limit = max(0, int(max_theme_buys_per_day))
     slip = max(0.0, slippage_bps) / 10000
     fee = max(0.0, fee_bps) / 10000
+    sell_tax = max(0.0, sell_tax_bps) / 10000
+    minimum_fee = max(0.0, min_fee)
     day_capital_used = max(0.0, current_capital_used)
     capital_limit = max(0.0, max_total_capital)
     for signal_rank, (candidate, history, pos) in enumerate(daily_candidates, start=1):
         signal_type = candidate.signal_type
-        if signal_type not in EXECUTABLE_BUY_SIGNAL_TYPES:
+        if signal_type not in buy_signal_set:
             stats["skipped_unbuyable_signal_type"] += 1
             continue
         stats["passed"] += 1
@@ -1051,6 +1095,7 @@ def _first_signal_executable_date(
             lot_size=lot_size,
             max_capital=max_capital_per_trade,
             fee_rate=fee,
+            min_fee=minimum_fee,
         )
         if shares <= 0:
             stats["skipped_one_lot_too_expensive"] += 1
@@ -1060,12 +1105,12 @@ def _first_signal_executable_date(
             continue
 
         exit_value = shares * effective_exit_price
-        buy_fee = invested * fee
+        buy_fee = _commission_fee(invested, fee, minimum_fee)
         cash_needed = invested + buy_fee
         if capital_limit > 0 and day_capital_used + cash_needed > capital_limit:
             stats["skipped_total_capital_limit"] += 1
             continue
-        sell_fee = exit_value * fee
+        sell_fee = _sell_cost(exit_value, fee, minimum_fee, sell_tax)
         pnl = exit_value - invested - buy_fee - sell_fee
         ret = pnl / cash_needed if cash_needed > 0 else 0.0
         trade = {
@@ -1083,6 +1128,8 @@ def _first_signal_executable_date(
             "score": round(candidate.score, 4),
             "breakout_pct": round(candidate.breakout_pct * 100, 4),
             "volume_ratio": round(candidate.volume_ratio, 4),
+            "activity_source": candidate.activity_source,
+            "activity_ratio": round(candidate.activity_ratio or candidate.volume_ratio, 4),
             "raw_entry_price": round(raw_entry_price, 4),
             "effective_entry_price": round(effective_entry_price, 4),
             "entry_price": round(effective_entry_price, 4),
@@ -1102,6 +1149,8 @@ def _first_signal_executable_date(
             "return_pct": round(ret * 100, 4),
             "slippage_bps": round(slippage_bps, 4),
             "fee_bps": round(fee_bps, 4),
+            "min_fee": round(minimum_fee, 4),
+            "sell_tax_bps": round(sell_tax_bps, 4),
             "max_capital_per_trade": round(max_capital_per_trade, 2),
             "min_capital_per_trade": round(min_capital_per_trade, 2),
             "entry_skipped_reason": "",
@@ -1131,6 +1180,28 @@ def _primary_tag(candidate: Candidate) -> str:
 
 def _has_known_primary_tag(candidate: Candidate) -> bool:
     return bool(candidate.tags)
+
+
+def _signal_type_counts(candidates: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        signal_type = str(getattr(candidate, "signal_type", "") or "D").upper()
+        counts[signal_type] = counts.get(signal_type, 0) + 1
+    return counts
+
+
+def _commission_fee(value: float, fee_rate: float, min_fee: float = 0.0) -> float:
+    if value <= 0:
+        return 0.0
+    rate_fee = value * max(0.0, fee_rate)
+    floor = max(0.0, min_fee)
+    if rate_fee <= 0 and floor <= 0:
+        return 0.0
+    return max(rate_fee, floor)
+
+
+def _sell_cost(value: float, fee_rate: float, min_fee: float = 0.0, tax_rate: float = 0.0) -> float:
+    return _commission_fee(value, fee_rate, min_fee) + max(0.0, value) * max(0.0, tax_rate)
 
 
 def _load_cached_tag_map(cache_dir: Path, codes: set[str]) -> dict[str, tuple[str, ...]]:
@@ -1445,7 +1516,23 @@ def _load_backtest_calendar(config: AppConfig, trading_dates: list[pd.Timestamp]
         return pd.DataFrame(columns=["cal_date", "is_open"])
     start = pd.Timestamp(trading_dates[0]).date()
     end = pd.Timestamp(trading_dates[-1]).date()
-    return fetch_trade_calendar(start, end, config.paths.cache_dir)
+    cached_parts: list[pd.DataFrame] = []
+    trade_cal_dir = config.paths.cache_dir / "trade_cal"
+    for path in sorted(trade_cal_dir.glob("*.csv")):
+        cached = _read_trade_calendar_cache(path)
+        if cached.empty:
+            continue
+        mask = (cached["cal_date"].dt.date >= start) & (cached["cal_date"].dt.date <= end)
+        if mask.any():
+            cached_parts.append(cached.loc[mask])
+    if cached_parts:
+        return (
+            pd.concat(cached_parts, ignore_index=True)
+            .drop_duplicates(subset=["cal_date"], keep="last")
+            .sort_values("cal_date")
+            .reset_index(drop=True)
+        )
+    return pd.DataFrame({"cal_date": pd.to_datetime(trading_dates), "is_open": True})
 
 
 def _summarize(
@@ -1643,6 +1730,9 @@ def _summarize_first_signal_executable(
     start_date: str,
     end_date: str,
     max_total_capital: float = 0.0,
+    min_fee: float = 0.0,
+    sell_tax_bps: float = 0.0,
+    buy_signal_types: tuple[str, ...] = DEFAULT_EXECUTABLE_BUY_SIGNAL_TYPES,
 ) -> pd.DataFrame:
     signal_days = len(first_signal_filter_rows)
     days_with_candidates = sum(1 for row in first_signal_filter_rows if int(row.get("raw_candidates", 0)) > 0)
@@ -1653,6 +1743,9 @@ def _summarize_first_signal_executable(
     skipped_below_min = sum(int(row.get("skipped_below_min_capital", 0)) for row in first_signal_filter_rows)
     skipped_capital_limit = sum(int(row.get("skipped_total_capital_limit", 0)) for row in first_signal_filter_rows)
     raw_candidates = sum(int(row.get("raw_candidates", 0)) for row in first_signal_filter_rows)
+    raw_buyable_candidates = sum(int(row.get("raw_buyable_candidates", 0)) for row in first_signal_filter_rows)
+    raw_observation_candidates = sum(int(row.get("raw_observation_candidates", 0)) for row in first_signal_filter_rows)
+    raw_excluded_candidates = sum(int(row.get("raw_excluded_candidates", 0)) for row in first_signal_filter_rows)
     tagged_candidates = sum(int(row.get("raw_tagged_candidates", 0)) for row in first_signal_filter_rows)
     tag_cache_total = max((int(row.get("tag_cache_total", 0)) for row in first_signal_filter_rows), default=0)
     tag_cache_covered = max((int(row.get("tag_cache_covered", 0)) for row in first_signal_filter_rows), default=0)
@@ -1662,6 +1755,7 @@ def _summarize_first_signal_executable(
         "end_date": end_date,
         "execution_mode": "executable_first_signal",
         "duplicate_policy": "same_code_buy_once_after_execution",
+        "buy_signal_types": "/".join(sorted({item.strip().upper() for item in buy_signal_types if item.strip()})),
         "capital_per_trade": round(max_capital_per_trade, 2),
         "max_buys_per_day": int(max_buys_per_day),
         "max_theme_buys_per_day": int(max_theme_buys_per_day),
@@ -1671,10 +1765,16 @@ def _summarize_first_signal_executable(
         "min_capital_per_trade": round(min_capital_per_trade, 2),
         "slippage_bps": round(slippage_bps, 4),
         "fee_bps": round(fee_bps, 4),
+        "min_fee": round(min_fee, 4),
+        "sell_tax_bps": round(sell_tax_bps, 4),
         "stop_loss_pct": round(stop_loss_pct, 2),
         "signal_days": signal_days,
         "days_with_candidates": days_with_candidates,
-        "raw_first_signal_candidates": total_passed,
+        "raw_first_signal_candidates": raw_candidates,
+        "buyable_first_signal_candidates": raw_buyable_candidates or total_passed,
+        "observation_first_signal_candidates": raw_observation_candidates,
+        "excluded_first_signal_candidates": raw_excluded_candidates,
+        "passed_buyable_candidates": total_passed,
         "theme_limit_applied": theme_limit_applied,
         "skipped_one_lot_too_expensive": skipped_one_lot,
         "skipped_daily_limit": skipped_daily_limit,
@@ -1687,6 +1787,8 @@ def _summarize_first_signal_executable(
         "tagged_first_signal_candidates": tagged_candidates,
         "tag_candidate_coverage_pct": round(tagged_candidates / raw_candidates * 100, 2) if raw_candidates else 0.0,
     }
+    for signal_type in ("A", "B", "C1", "C2", "C", "D"):
+        base[f"raw_signal_{signal_type}"] = sum(int(row.get(f"raw_signal_{signal_type}", 0)) for row in first_signal_filter_rows)
     if trades_df.empty:
         return pd.DataFrame(
             [
@@ -1837,19 +1939,20 @@ def _html_report_title(report_mode: str) -> str:
 
 def _html_first_signal_note(report_mode: str) -> str:
     if report_mode == "first_signal_executable":
-        return "口径：first-signal executable backtest，按交易日回放 A/B 首次信号，下一交易日开盘按整手买入；C1 仅统计为未买入观察信号。限制每日限流、题材限额和可选总资金上限，计入滑点、费率、标签覆盖率和峰值资金占用，持有到最新交易日或触发设定止损。"
+        return "口径：first-signal executable backtest，默认只买 A 类周线确认首次信号；B/C1/C2 仅统计为未买入观察信号。下一交易日开盘按整手买入，限制每日限流、题材限额和可选总资金上限，计入滑点、最低佣金、卖出印花税、标签覆盖率和峰值资金占用，持有到最新交易日或触发设定止损。"
     return "口径：从一年前开始逐个交易日回放策略信号，A/B/C 类首次出现则下一交易日开盘按固定金额研究口径买入；同一股票后续重复信号不重复买入，持有到最新交易日或触发设定止损。该口径用于信号收益研究，不代表实盘成交。"
 
 
 def _html_first_signal_summary_header(report_mode: str) -> str:
     if report_mode == "first_signal_executable":
-        return "<thead><tr><th>区间</th><th>单票上限</th><th>总资金上限</th><th>一手</th><th>每日限流</th><th>题材限额</th><th>滑点bps</th><th>费率bps</th><th>止损</th><th>信号日</th><th>有候选日</th><th>首次候选</th><th>标签覆盖</th><th>买入数</th><th>总投入</th><th>现金投入</th><th>期末/止损后市值</th><th>总收益</th><th>总收益率</th><th>胜率</th><th>止损数</th><th>止损率</th><th>资金跳过</th><th>峰值资金占用</th></tr></thead>"
+        return "<thead><tr><th>区间</th><th>买入信号</th><th>单票上限</th><th>总资金上限</th><th>一手</th><th>每日限流</th><th>题材限额</th><th>滑点bps</th><th>费率bps</th><th>最低佣金</th><th>卖税bps</th><th>止损</th><th>信号日</th><th>有候选日</th><th>首次候选</th><th>可买候选</th><th>观察候选</th><th>标签覆盖</th><th>买入数</th><th>总投入</th><th>现金投入</th><th>期末/止损后市值</th><th>总收益</th><th>总收益率</th><th>胜率</th><th>止损数</th><th>止损率</th><th>资金跳过</th><th>峰值资金占用</th></tr></thead>"
     return "<thead><tr><th>区间</th><th>单只买入</th><th>止损</th><th>信号日</th><th>有候选日</th><th>首次候选</th><th>买入数</th><th>总投入</th><th>期末/止损后市值</th><th>总收益</th><th>总收益率</th><th>胜率</th><th>止损数</th><th>止损率</th></tr></thead>"
 
 
 def _html_first_signal_summary_cells(report_mode: str) -> str:
     if report_mode == "first_signal_executable":
         return """          cell(`${row.start_date} ~ ${row.end_date}`),
+          cell(row.buy_signal_types ?? "A"),
           cell(fmt(row.max_capital_per_trade ?? row.capital_per_trade, 0)),
           cell(row.max_total_capital ? fmt(row.max_total_capital, 0) : "不限"),
           cell(row.lot_size ?? "-"),
@@ -1857,10 +1960,14 @@ def _html_first_signal_summary_cells(report_mode: str) -> str:
           cell(row.max_theme_buys_per_day ?? "-"),
           cell(fmt(row.slippage_bps ?? 0, 1)),
           cell(fmt(row.fee_bps ?? 0, 1)),
+          cell(fmt(row.min_fee ?? 0, 2)),
+          cell(fmt(row.sell_tax_bps ?? 0, 1)),
           cell(`${fmt(row.stop_loss_pct)}%`),
           cell(row.signal_days),
           cell(row.days_with_candidates),
           cell(row.raw_first_signal_candidates),
+          cell(row.buyable_first_signal_candidates ?? row.passed_buyable_candidates ?? 0),
+          cell(row.observation_first_signal_candidates ?? 0),
           cell(`${fmt(row.tag_candidate_coverage_pct ?? 0)}%`),
           cell(row.trades),
           cell(fmt(row.total_invested, 2)),
@@ -2057,23 +2164,18 @@ __FIRST_SIGNAL_SUMMARY_CELLS__
     }
     function renderTrades(id, rows) {
       const table = document.getElementById(id);
-      table.innerHTML = "<thead><tr><th>信号日</th><th class='name'>股票</th><th>持有/区间</th><th>排名</th><th>得分</th><th>买入</th><th>卖出</th><th>股数</th><th>费用</th><th>资金占用</th><th>收益</th></tr></thead>";
+      table.innerHTML = "<thead><tr><th>信号日</th><th class='name'>股票</th><th>持有</th><th>排名</th><th>得分</th><th>买入</th><th>卖出</th><th>收益</th></tr></thead>";
       const body = document.createElement("tbody");
       rows.forEach(row => {
         const tr = document.createElement("tr");
-        const holding = row.holding_days ? `${row.holding_days}日` : `${row.entry_date || "-"} ~ ${row.exit_date || "-"}`;
-        const fee = Number(row.buy_fee || 0) + Number(row.sell_fee || 0);
         tr.append(
           cell(row.signal_date),
           cell(`${row.code} ${row.name}`, "name"),
-          cell(holding),
+          cell(row.holding_days ? `${row.holding_days}日` : "-"),
           cell(row.rank),
           cell(fmt(row.score, 1)),
           cell(fmt(row.entry_price)),
           cell(fmt(row.exit_price)),
-          cell(row.shares ?? "-"),
-          cell(fmt(fee, 2)),
-          cell(fmt(row.capital_reserved ?? row.invested ?? 0, 2)),
           signed(row.return_pct)
         );
         body.appendChild(tr);

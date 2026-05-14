@@ -31,3 +31,6 @@ def test_backtest_first_signal_executable_help_shows_executable_options(capsys) 
     assert "--max-buys-per-day" in output
     assert "--slippage-bps" in output
     assert "--fee-bps" in output
+    assert "--min-fee" in output
+    assert "--sell-tax-bps" in output
+    assert "--buy-signal-types" in output

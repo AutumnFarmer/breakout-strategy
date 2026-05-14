@@ -8,6 +8,7 @@ import pytest
 from a_breakout_screener.backtest import (
     _backtest_signal_date,
     _is_backtest_week_confirmed,
+    _load_backtest_calendar,
     _long_hold_exit,
     _previous_week_already_broke_out,
     _prepare_history,
@@ -80,6 +81,18 @@ def test_backtest_week_confirmation_uses_common_trading_dates() -> None:
     assert _is_backtest_week_confirmed(pd.Timestamp("2026-05-15"), week_calendar)
     assert _is_backtest_week_confirmed(pd.Timestamp("2026-05-07"), short_week_calendar)
     assert not _is_backtest_week_confirmed(pd.Timestamp("2026-05-07"), pd.DataFrame())
+
+
+def test_backtest_calendar_derives_from_cached_trading_dates_without_network(tmp_path) -> None:
+    config = AppConfig(paths=SimpleNamespace(cache_dir=tmp_path))
+    trading_dates = [pd.Timestamp("2026-05-11"), pd.Timestamp("2026-05-13"), pd.Timestamp("2026-05-15")]
+
+    calendar = _load_backtest_calendar(config, trading_dates)
+
+    assert calendar["cal_date"].dt.strftime("%Y-%m-%d").tolist() == ["2026-05-11", "2026-05-13", "2026-05-15"]
+    assert calendar["is_open"].tolist() == [True, True, True]
+    assert not _is_backtest_week_confirmed(pd.Timestamp("2026-05-13"), calendar)
+    assert _is_backtest_week_confirmed(pd.Timestamp("2026-05-15"), calendar)
 
 
 def test_previous_week_breakout_blocks_repeated_a_confirmation() -> None:
@@ -189,6 +202,18 @@ def test_calc_lot_position_skips_when_one_lot_exceeds_budget() -> None:
     assert invested == 0
 
 
+def test_calc_lot_position_includes_minimum_buy_fee_in_budget() -> None:
+    shares, invested = calc_lot_position(10.0, 100, 1000, fee_rate=0.0003, min_fee=5)
+
+    assert shares == 0
+    assert invested == 0
+
+    shares, invested = calc_lot_position(10.0, 100, 1005, fee_rate=0.0003, min_fee=5)
+
+    assert shares == 100
+    assert invested == pytest.approx(1000)
+
+
 def test_first_signal_backtest_buys_same_stock_once(monkeypatch) -> None:
     dates = pd.bdate_range("2026-01-01", periods=8)
     history = pd.DataFrame(
@@ -260,7 +285,7 @@ def test_executable_first_signal_limits_daily_buys(monkeypatch, tmp_path) -> Non
         if pos != 1:
             return None
         score = 100 - int(prepared.code)
-        return _candidate(prepared.code, prepared.name, score=score, signal_type="B")
+        return _candidate(prepared.code, prepared.name, score=score, signal_type="A")
 
     monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", signal_on_second_day)
 
@@ -296,7 +321,7 @@ def test_executable_first_signal_limits_theme_buys(monkeypatch, tmp_path) -> Non
     def same_theme_signal(prepared, pos, config, resistance=None, **kwargs):
         if pos != 1:
             return None
-        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="B", tags=("AI",))
+        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="A", tags=("AI",))
 
     monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", same_theme_signal)
 
@@ -332,7 +357,7 @@ def test_executable_first_signal_limits_unknown_theme_bucket(monkeypatch, tmp_pa
     def untagged_signal(prepared, pos, config, resistance=None, **kwargs):
         if pos != 1:
             return None
-        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="B")
+        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="A")
 
     monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", untagged_signal)
 
@@ -390,6 +415,42 @@ def test_executable_first_signal_does_not_buy_c1_by_default(monkeypatch, tmp_pat
     assert sum(int(row["skipped_unbuyable_signal_type"]) for row in filters) == 1
 
 
+def test_executable_first_signal_does_not_buy_b_by_default(monkeypatch, tmp_path) -> None:
+    dates = pd.bdate_range("2026-01-01", periods=5)
+    prepared = _sample_prepared("000001", dates)
+    config = AppConfig(
+        screener=ScreenerConfig(min_history_rows=1, min_amount=1, min_price=1),
+        paths=SimpleNamespace(cache_dir=tmp_path),
+    )
+
+    def b_signal(prepared, pos, config, resistance=None, **kwargs):
+        if pos != 1:
+            return None
+        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="B")
+
+    monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", b_signal)
+
+    trades, filters = _run_first_signal_executable_backtest(
+        trading_dates=[pd.Timestamp(item) for item in dates],
+        prepared_histories=(prepared,),
+        config=config,
+        lookback_days=30,
+        lot_size=100,
+        max_capital_per_trade=1000,
+        min_capital_per_trade=0,
+        max_buys_per_day=10,
+        max_theme_buys_per_day=1,
+        slippage_bps=0,
+        fee_bps=0,
+        stop_loss_pct=30,
+    )
+
+    assert trades == []
+    assert sum(int(row["raw_signal_B"]) for row in filters) == 1
+    assert sum(int(row["raw_observation_candidates"]) for row in filters) == 1
+    assert sum(int(row["skipped_unbuyable_signal_type"]) for row in filters) == 1
+
+
 def test_executable_first_signal_slippage_and_fees_reduce_return(monkeypatch, tmp_path) -> None:
     dates = pd.bdate_range("2026-01-01", periods=5)
     prepared = _sample_prepared("000001", dates, entry_open=10.0, exit_close=12.0)
@@ -401,7 +462,7 @@ def test_executable_first_signal_slippage_and_fees_reduce_return(monkeypatch, tm
     def one_signal(prepared, pos, config, resistance=None, **kwargs):
         if pos != 1:
             return None
-        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="B")
+        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="A")
 
     monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", one_signal)
 
@@ -431,11 +492,15 @@ def test_executable_first_signal_slippage_and_fees_reduce_return(monkeypatch, tm
         max_theme_buys_per_day=2,
         slippage_bps=10,
         fee_bps=3,
+        min_fee=5,
+        sell_tax_bps=5,
         stop_loss_pct=30,
     )
 
     assert cost_trades[0]["return_pct"] < no_cost_trades[0]["return_pct"]
-    assert cost_trades[0]["buy_fee"] > 0
+    assert cost_trades[0]["buy_fee"] == pytest.approx(5)
+    assert cost_trades[0]["sell_fee"] > cost_trades[0]["buy_fee"]
+    assert cost_trades[0]["activity_ratio"] == pytest.approx(2.0)
     summary = _summarize_first_signal_executable(
         pd.DataFrame(cost_trades),
         first_signal_filter_rows=filters,
@@ -447,6 +512,8 @@ def test_executable_first_signal_slippage_and_fees_reduce_return(monkeypatch, tm
         max_theme_buys_per_day=2,
         slippage_bps=10,
         fee_bps=3,
+        min_fee=5,
+        sell_tax_bps=5,
         stop_loss_pct=30,
         start_date="2026-01-01",
         end_date="2026-01-07",
@@ -466,7 +533,7 @@ def test_executable_first_signal_counts_one_lot_too_expensive(monkeypatch, tmp_p
     def one_signal(prepared, pos, config, resistance=None, **kwargs):
         if pos != 1:
             return None
-        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="B")
+        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="A")
 
     monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", one_signal)
 
@@ -500,7 +567,7 @@ def test_executable_first_signal_limits_total_capital(monkeypatch, tmp_path) -> 
     def one_day_signal(prepared, pos, config, resistance=None, **kwargs):
         if pos != 1:
             return None
-        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="B")
+        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="A")
 
     monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", one_day_signal)
 
@@ -621,10 +688,15 @@ def test_executable_html_uses_executable_first_signal_wording() -> None:
                 "max_theme_buys_per_day": 2,
                 "slippage_bps": 10.0,
                 "fee_bps": 3.0,
+                "min_fee": 5.0,
+                "sell_tax_bps": 5.0,
+                "buy_signal_types": "A",
                 "stop_loss_pct": 30.0,
                 "signal_days": 1,
                 "days_with_candidates": 1,
                 "raw_first_signal_candidates": 1,
+                "buyable_first_signal_candidates": 1,
+                "observation_first_signal_candidates": 0,
                 "trades": 1,
                 "total_invested": 1000.0,
                 "ending_value": 1100.0,
@@ -678,6 +750,8 @@ def test_executable_html_uses_executable_first_signal_wording() -> None:
     assert "峰值资金占用" in html
     assert "max_buys_per_day" in html
     assert "lot_size" in html
+    assert "buy_signal_types" in html
+    assert "sell_tax_bps" in html
     assert "peak_capital_used" in html
     assert "undefined日" not in html
     assert "capital_reserved" in html

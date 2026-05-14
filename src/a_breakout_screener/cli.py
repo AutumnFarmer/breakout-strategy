@@ -82,6 +82,9 @@ def _build_parser() -> argparse.ArgumentParser:
     executable.add_argument("--max-theme-buys-per-day", type=int, default=2, help="Maximum buys per primary tag per day, default: 2")
     executable.add_argument("--slippage-bps", type=float, default=10.0, help="Entry/exit slippage in basis points, default: 10")
     executable.add_argument("--fee-bps", type=float, default=3.0, help="Buy/sell fee rate in basis points, default: 3")
+    executable.add_argument("--min-fee", type=float, default=5.0, help="Minimum commission per side, default: 5")
+    executable.add_argument("--sell-tax-bps", type=float, default=5.0, help="Sell-side stamp tax in basis points, default: 5")
+    executable.add_argument("--buy-signal-types", default="A", help="Comma separated signal types eligible for executable buys, default: A")
     executable.add_argument("--capital-per-trade", type=float, default=None, help=argparse.SUPPRESS)
     executable.add_argument("--stop-loss-pct", type=float, default=30.0, help="Stop loss percent, default: 30")
     return parser
@@ -180,11 +183,14 @@ def _backtest_first_signal_executable(args: argparse.Namespace, config: AppConfi
         max_capital_per_trade=max(0.01, max_capital_per_trade),
         max_total_capital=max(0.0, args.max_total_capital),
         min_capital_per_trade=max(0.0, args.min_capital_per_trade),
-        max_buys_per_day=max(1, args.max_buys_per_day),
+        max_buys_per_day=max(0, args.max_buys_per_day),
         max_theme_buys_per_day=max(0, args.max_theme_buys_per_day),
         slippage_bps=max(0.0, args.slippage_bps),
         fee_bps=max(0.0, args.fee_bps),
+        min_fee=max(0.0, args.min_fee),
+        sell_tax_bps=max(0.0, args.sell_tax_bps),
         stop_loss_pct=max(0.0, args.stop_loss_pct),
+        buy_signal_types=_parse_signal_types(args.buy_signal_types),
         symbols={item.strip() for item in args.symbols.split(",") if item.strip()} or None,
     )
     print(
@@ -253,6 +259,11 @@ def _parse_int_tuple(value: str) -> tuple[int, ...]:
     if not items:
         raise ValueError("expected at least one integer")
     return items
+
+
+def _parse_signal_types(value: str) -> tuple[str, ...]:
+    items = tuple(dict.fromkeys(item.strip().upper() for item in value.split(",") if item.strip()))
+    return items or ("A",)
 
 
 if __name__ == "__main__":

@@ -65,7 +65,7 @@
 
 ## 实盘化 first-signal 回测
 
-单独命令 `backtest-first-signal-executable` 使用本地历史缓存做首次信号的实盘化近似回测，不会联网拉取行情。旧命令 `backtest-first-signal` 保留固定金额研究口径，用于兼容原有输出。
+单独命令 `backtest-first-signal-executable` 使用本地历史缓存做首次信号的实盘化近似回测，不会联网拉取行情或交易日历；交易日历优先读本地 `trade_cal` 缓存，缺失时用全市场缓存交易日推导。旧命令 `backtest-first-signal` 保留固定金额研究口径，用于兼容原有输出。
 
 ```bash
 uv run a-breakout --config config.toml backtest-first-signal-executable \
@@ -76,12 +76,15 @@ uv run a-breakout --config config.toml backtest-first-signal-executable \
   --max-buys-per-day 3 \
   --max-theme-buys-per-day 2 \
   --slippage-bps 10 \
-  --fee-bps 3
+  --fee-bps 3 \
+  --min-fee 5 \
+  --sell-tax-bps 5 \
+  --buy-signal-types A
 ```
 
-该模式按交易日回放 A/B 首次信号并买入，C1 强趋势信号只统计为未买入观察信号；下一交易日开盘按 `lot_size` 整手买入。如果一手成本超过 `max_capital_per_trade` 则跳过。设置 `max_total_capital` 后会按持仓占用约束总资金，默认 0 表示只统计峰值占用、不限制总资金。同一天最多新增 `max_buys_per_day` 只，同一主标签最多新增 `max_theme_buys_per_day` 只；主标签来自本地 `stock_tags` 缓存，缺失时会进入 `UNKNOWN` 主题桶参与限额，汇总里会标明题材标签缓存覆盖率和候选覆盖率。
+该模式按交易日回放首次信号，默认只买入 A 类周线确认；B/C1/C2 只进入观察统计。需要研究 B 类小仓试错时可显式传 `--buy-signal-types A,B`，避免默认把日线预警和 A 类买点混成同一口径。下一交易日开盘按 `lot_size` 整手买入，如果一手成本加最低佣金超过 `max_capital_per_trade` 则跳过。设置 `max_total_capital` 后会按持仓占用约束总资金，默认 0 表示只统计峰值占用、不限制总资金。同一天最多新增 `max_buys_per_day` 只，传 0 可做纯观察 dry-run；同一主标签最多新增 `max_theme_buys_per_day` 只。主标签来自本地 `stock_tags` 缓存，缺失时会进入 `UNKNOWN` 主题桶参与限额，汇总里会标明题材标签缓存覆盖率和候选覆盖率。
 
-输出目录为 `outputs/backtest/<date>/first_signal_executable/`。`first_signal_executable_trades.csv` 会同时保留原始开盘/卖出价、滑点后的有效成交价、整手数、实际投入、买卖费用、资金占用和 PnL；`first_signal_executable_summary.csv` 汇总总投入、含买入费的现金投入、总收益、胜率、止损率、最大持仓数、峰值资金占用、总资金约束跳过数量和一手过贵跳过数量。手续费暂按 `fee_bps` 比例费率计算，未加入最低 5 元费用假设。
+输出目录为 `outputs/backtest/<date>/first_signal_executable/`。`first_signal_executable_trades.csv` 会同时保留原始开盘/卖出价、滑点后的有效成交价、量能来源、整手数、实际投入、买卖费用、资金占用和 PnL；`first_signal_executable_summary.csv` 汇总总投入、含买入费的现金投入、总收益、胜率、止损率、最大持仓数、峰值资金占用、总资金约束跳过数量和一手过贵跳过数量。费用模型包含 `fee_bps` 比例佣金、`min_fee` 单边最低佣金和 `sell_tax_bps` 卖出侧印花税。
 
 ## 风险边界
 
