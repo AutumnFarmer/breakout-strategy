@@ -18,6 +18,7 @@ from a_breakout_screener.backtest import (
     _summarize_first_signal_executable,
     _summarize_long_hold,
     calc_lot_position,
+    limit_up_threshold_pct,
     run_first_signal_backtest,
     run_first_signal_executable_backtest,
 )
@@ -72,8 +73,8 @@ def test_backtest_week_confirmation_uses_common_trading_dates() -> None:
     )
     short_week_calendar = pd.DataFrame(
         {
-            "cal_date": pd.to_datetime(["2026-05-04", "2026-05-07"]),
-            "is_open": [True, True],
+            "cal_date": pd.to_datetime(["2026-05-04", "2026-05-05", "2026-05-06", "2026-05-07", "2026-05-08"]),
+            "is_open": [True, True, True, True, False],
         }
     )
 
@@ -81,6 +82,17 @@ def test_backtest_week_confirmation_uses_common_trading_dates() -> None:
     assert _is_backtest_week_confirmed(pd.Timestamp("2026-05-15"), week_calendar)
     assert _is_backtest_week_confirmed(pd.Timestamp("2026-05-07"), short_week_calendar)
     assert not _is_backtest_week_confirmed(pd.Timestamp("2026-05-07"), pd.DataFrame())
+
+
+def test_week_confirmation_fails_closed_on_incomplete_calendar() -> None:
+    partial_calendar = pd.DataFrame(
+        {
+            "cal_date": pd.to_datetime(["2026-05-11", "2026-05-12", "2026-05-13", "2026-05-14"]),
+            "is_open": [True, True, True, True],
+        }
+    )
+
+    assert not _is_backtest_week_confirmed(pd.Timestamp("2026-05-14"), partial_calendar)
 
 
 def test_backtest_calendar_without_cache_fails_closed_to_friday_only(tmp_path) -> None:
@@ -771,6 +783,173 @@ def test_executable_first_signal_skips_limit_up_entry_day(monkeypatch, tmp_path)
     assert sum(int(row["skipped_limit_up_entry"]) for row in filters) == 1
 
 
+def test_limit_up_threshold_by_board() -> None:
+    assert limit_up_threshold_pct("000001", "平安银行") == pytest.approx(0.10)
+    assert limit_up_threshold_pct("300001", "特锐德") == pytest.approx(0.20)
+    assert limit_up_threshold_pct("301001", "凯淳股份") == pytest.approx(0.20)
+    assert limit_up_threshold_pct("688001", "华兴源创") == pytest.approx(0.20)
+    assert limit_up_threshold_pct("000001", "*ST测试") == pytest.approx(0.05)
+    assert limit_up_threshold_pct("830001", "北交所测试") == pytest.approx(0.30)
+
+
+def test_executable_first_signal_does_not_treat_chinext_ten_pct_as_limit_up(monkeypatch, tmp_path) -> None:
+    dates = pd.bdate_range("2026-01-01", periods=5)
+    prepared = _sample_prepared("300001", dates)
+    prepared.history.loc[2, ["open", "high", "low", "close"]] = 11.6
+    config = AppConfig(
+        screener=ScreenerConfig(min_history_rows=1, min_amount=1, min_price=1),
+        paths=SimpleNamespace(cache_dir=tmp_path),
+    )
+
+    def one_signal(prepared, pos, config, resistance=None, **kwargs):
+        if pos != 1:
+            return None
+        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="A")
+
+    monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", one_signal)
+
+    trades, filters = _run_first_signal_executable_backtest(
+        trading_dates=[pd.Timestamp(item) for item in dates],
+        prepared_histories=(prepared,),
+        config=config,
+        lookback_days=30,
+        lot_size=100,
+        max_capital_per_trade=5000,
+        min_capital_per_trade=0,
+        max_buys_per_day=3,
+        max_theme_buys_per_day=2,
+        slippage_bps=0,
+        fee_bps=0,
+        stop_loss_pct=30,
+    )
+
+    assert len(trades) == 1
+    assert sum(int(row["skipped_limit_up_entry"]) for row in filters) == 0
+
+
+def test_executable_backtest_t_plus_one_no_same_day_exit(monkeypatch, tmp_path) -> None:
+    dates = pd.bdate_range("2026-01-01", periods=5)
+    prepared = _sample_prepared("000001", dates)
+    prepared.history.loc[2, "low"] = 1.0
+    prepared.history.loc[3, "low"] = 6.0
+    config = AppConfig(
+        screener=ScreenerConfig(min_history_rows=1, min_amount=1, min_price=1),
+        paths=SimpleNamespace(cache_dir=tmp_path),
+    )
+
+    def one_signal(prepared, pos, config, resistance=None, **kwargs):
+        if pos != 1:
+            return None
+        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="A")
+
+    monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", one_signal)
+
+    trades, _filters = _run_first_signal_executable_backtest(
+        trading_dates=[pd.Timestamp(item) for item in dates],
+        prepared_histories=(prepared,),
+        config=config,
+        lookback_days=30,
+        lot_size=100,
+        max_capital_per_trade=5000,
+        min_capital_per_trade=0,
+        max_buys_per_day=3,
+        max_theme_buys_per_day=2,
+        slippage_bps=0,
+        fee_bps=0,
+        stop_loss_pct=30,
+    )
+
+    assert len(trades) == 1
+    assert trades[0]["entry_date"] == dates[2].date().isoformat()
+    assert trades[0]["exit_date"] == dates[3].date().isoformat()
+    assert trades[0]["entry_date"] != trades[0]["exit_date"]
+    assert trades[0]["exit_reason"] == "stop_loss"
+
+
+def test_executable_backtest_entry_uses_next_market_trade_date(monkeypatch, tmp_path) -> None:
+    dates = pd.bdate_range("2026-01-01", periods=5)
+    prepared = _sample_prepared("000001", dates)
+    config = AppConfig(
+        screener=ScreenerConfig(min_history_rows=1, min_amount=1, min_price=1),
+        paths=SimpleNamespace(cache_dir=tmp_path),
+    )
+
+    def one_signal(prepared, pos, config, resistance=None, **kwargs):
+        if pos != 1:
+            return None
+        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="A")
+
+    monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", one_signal)
+
+    trades, filters = _run_first_signal_executable_backtest(
+        trading_dates=[pd.Timestamp(item) for item in dates],
+        prepared_histories=(prepared,),
+        config=config,
+        lookback_days=30,
+        lot_size=100,
+        max_capital_per_trade=5000,
+        min_capital_per_trade=0,
+        max_buys_per_day=3,
+        max_theme_buys_per_day=2,
+        slippage_bps=0,
+        fee_bps=0,
+        stop_loss_pct=30,
+    )
+
+    assert len(trades) == 1
+    assert trades[0]["signal_date"] == dates[1].date().isoformat()
+    assert trades[0]["target_entry_date"] == dates[2].date().isoformat()
+    assert trades[0]["entry_date"] == dates[2].date().isoformat()
+    assert trades[0]["backtest_mode"] == "first_signal_executable"
+    assert any(row["target_entry_date"] == dates[2].date().isoformat() for row in filters)
+
+
+def test_executable_backtest_skips_when_no_bar_on_target_entry_date(monkeypatch, tmp_path) -> None:
+    market_dates = pd.bdate_range("2026-01-01", periods=5)
+    stock_dates = market_dates.delete(2)
+    history = pd.DataFrame(
+        {
+            "date": stock_dates,
+            "open": [10.0, 10.0, 11.0, 11.5],
+            "high": [11.0, 11.0, 12.5, 12.5],
+            "low": [9.5, 9.5, 10.5, 11.0],
+            "close": [10.0, 10.5, 11.5, 12.0],
+            "volume": [1_000_000] * len(stock_dates),
+            "amount": [100_000_000] * len(stock_dates),
+        }
+    )
+    prepared = _prepare_history("000001", "平安银行", history)
+    config = AppConfig(
+        screener=ScreenerConfig(min_history_rows=1, min_amount=1, min_price=1),
+        paths=SimpleNamespace(cache_dir=tmp_path),
+    )
+
+    def one_signal(prepared, pos, config, resistance=None, **kwargs):
+        if pos != 1:
+            return None
+        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="A")
+
+    monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", one_signal)
+
+    trades, filters = _run_first_signal_executable_backtest(
+        trading_dates=[pd.Timestamp(item) for item in market_dates],
+        prepared_histories=(prepared,),
+        config=config,
+        lookback_days=30,
+        lot_size=100,
+        max_capital_per_trade=5000,
+        min_capital_per_trade=0,
+        max_buys_per_day=3,
+        max_theme_buys_per_day=2,
+        slippage_bps=0,
+        fee_bps=0,
+        stop_loss_pct=30,
+    )
+
+    assert trades == []
+    assert sum(int(row["skipped_no_bar_on_next_market_trade_date"]) for row in filters) == 1
+
+
 def test_executable_first_signal_limits_total_capital(monkeypatch, tmp_path) -> None:
     dates = pd.bdate_range("2026-01-01", periods=5)
     prepared_histories = tuple(_sample_prepared(f"{idx:06d}", dates) for idx in range(1, 4))
@@ -890,6 +1069,45 @@ def test_research_html_uses_research_first_signal_wording() -> None:
     assert "峰值资金占用" not in html
 
 
+def test_html_mode_detection_does_not_use_shares() -> None:
+    trades = pd.DataFrame(
+        [
+            {
+                "backtest_mode": "research",
+                "signal_date": "2026-01-02",
+                "entry_date": "2026-01-05",
+                "exit_date": "2026-01-07",
+                "signal_rank": 1,
+                "code": "000001",
+                "name": "平安银行",
+                "score": 90.0,
+                "entry_price": 10.0,
+                "exit_price": 11.0,
+                "shares": 100.0,
+                "invested": 1000.0,
+                "exit_value": 1100.0,
+                "pnl": 100.0,
+                "return_pct": 10.0,
+            }
+        ]
+    )
+
+    html = _render_html(
+        pd.DataFrame(),
+        pd.DataFrame(),
+        signal_days=1,
+        stock_count=1,
+        long_hold_summary_df=pd.DataFrame(),
+        long_hold_trades_df=pd.DataFrame(),
+        first_signal_summary_df=pd.DataFrame(),
+        first_signal_trades_df=trades,
+    )
+
+    assert 'backtest_mode": "research"' in html
+    assert "shares !== undefined" not in html
+    assert 'backtest_mode === "first_signal_executable"' in html
+
+
 def test_executable_html_uses_executable_first_signal_wording() -> None:
     summary = pd.DataFrame(
         [
@@ -928,6 +1146,7 @@ def test_executable_html_uses_executable_first_signal_wording() -> None:
     trades = pd.DataFrame(
         [
             {
+                "backtest_mode": "first_signal_executable",
                 "signal_date": "2026-01-02",
                 "entry_date": "2026-01-05",
                 "exit_date": "2026-01-07",

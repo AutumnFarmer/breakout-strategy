@@ -168,6 +168,7 @@ def run_backtest(
         lookback_days=long_hold_days,
         capital_per_trade=capital_per_trade,
         stop_loss_pct=stop_loss_pct,
+        calendar=calendar,
     )
     first_signal_trades_df = pd.DataFrame(first_signal_trades)
     first_signal_summary_df = _summarize_first_signal(
@@ -782,6 +783,7 @@ def _first_signal_for_stock(
         pnl = exit_value - capital_per_trade
         ret = exit_value / capital_per_trade - 1
         return {
+            "backtest_mode": "research",
             "signal_date": pd.Timestamp(latest["date"]).date().isoformat(),
             "entry_date": pd.Timestamp(entry_row["date"]).date().isoformat(),
             "exit_date": pd.Timestamp(exit_row["date"]).date().isoformat(),
@@ -861,6 +863,7 @@ def _first_signal_date(
         bought_codes.add(candidate.code)
         trades.append(
             {
+                "backtest_mode": "research",
                 "signal_date": signal_ts.date().isoformat(),
                 "entry_date": pd.Timestamp(entry_row["date"]).date().isoformat(),
                 "exit_date": pd.Timestamp(exit_row["date"]).date().isoformat(),
@@ -914,15 +917,25 @@ def _run_first_signal_executable_backtest(
     tag_cache_covered = len(tag_map)
     bought_codes: set[str] = set()
     seen_buy_signal_codes: set[str] = set()
-    active_positions: list[tuple[pd.Timestamp, float]] = []
+    active_positions: list[tuple[pd.Timestamp, pd.Timestamp, float]] = []
     trades: list[dict[str, Any]] = []
     filter_rows: list[dict[str, Any]] = []
     stop_loss_fraction = max(0.0, stop_loss_pct) / 100
     total = len(signal_dates)
     for idx, signal_ts in enumerate(signal_dates, start=1):
         signal_day = pd.Timestamp(signal_ts).normalize()
-        active_positions = [(exit_ts, cash) for exit_ts, cash in active_positions if exit_ts > signal_day]
-        current_capital_used = sum(cash for _, cash in active_positions)
+        target_entry_ts = _next_market_trade_date(signal_ts, trading_dates)
+        capital_check_day = target_entry_ts if target_entry_ts is not None else signal_day
+        active_positions = [
+            (entry_ts, exit_ts, cash)
+            for entry_ts, exit_ts, cash in active_positions
+            if exit_ts >= capital_check_day
+        ]
+        current_capital_used = sum(
+            cash
+            for entry_ts, exit_ts, cash in active_positions
+            if entry_ts <= capital_check_day <= exit_ts
+        )
         day_trades, stats = _first_signal_executable_date(
             signal_ts=signal_ts,
             end_ts=end_ts,
@@ -951,6 +964,7 @@ def _run_first_signal_executable_backtest(
         for trade in day_trades:
             active_positions.append(
                 (
+                    pd.Timestamp(trade["entry_date"]).normalize(),
                     pd.Timestamp(trade["exit_date"]).normalize(),
                     _finite_float(trade.get("capital_reserved")),
                 )
@@ -969,6 +983,56 @@ def _run_first_signal_executable_backtest(
         if idx == 1 or idx % 20 == 0 or idx == total:
             print(f"首次信号实盘化回测进度: {idx}/{total} 个信号日", flush=True)
     return trades, filter_rows
+
+
+def _next_market_trade_date(
+    signal_ts: pd.Timestamp,
+    trading_dates: list[pd.Timestamp] | None,
+) -> pd.Timestamp | None:
+    if not trading_dates:
+        return None
+    signal_day = pd.Timestamp(signal_ts).normalize()
+    for item in trading_dates:
+        trade_day = pd.Timestamp(item).normalize()
+        if trade_day > signal_day:
+            return trade_day
+    return None
+
+
+def _history_pos_on_date(history: pd.DataFrame, trade_ts: pd.Timestamp) -> int | None:
+    target_day = pd.Timestamp(trade_ts).normalize()
+    pos = history["date"].searchsorted(target_day, side="left")
+    if pos >= len(history):
+        return None
+    if pd.Timestamp(history.iloc[pos]["date"]).normalize() != target_day:
+        return None
+    return int(pos)
+
+
+def limit_up_threshold_pct(code: str, name: str = "") -> float:
+    normalized_code = "".join(ch for ch in str(code) if ch.isdigit()).zfill(6)
+    normalized_name = str(name or "").upper()
+    if "ST" in normalized_name:
+        return 0.05
+    if normalized_code.startswith(("300", "301", "688")):
+        return 0.20
+    if normalized_code.startswith(("8", "4")):
+        return 0.30
+    return 0.10
+
+
+def _is_locked_limit_up_entry(
+    code: str,
+    name: str,
+    previous_close: float,
+    open_price: float,
+    low_price: float,
+    tolerance_pct: float = 0.005,
+) -> bool:
+    if previous_close <= 0 or open_price <= 0:
+        return False
+    threshold = max(0.0, limit_up_threshold_pct(code, name) - tolerance_pct)
+    return open_price >= previous_close * (1 + threshold) and low_price >= open_price * 0.999
 
 
 def _first_signal_executable_date(
@@ -999,6 +1063,7 @@ def _first_signal_executable_date(
     daily_candidates: list[tuple[Candidate, pd.DataFrame, int]] = []
     buy_signal_set = _normalize_buy_signal_types(buy_signal_types)
     week_confirmed = _is_backtest_week_confirmed(signal_ts, calendar, trading_dates)
+    target_entry_ts = _next_market_trade_date(signal_ts, trading_dates)
     for prepared in prepared_histories:
         if prepared.code in seen_buy_signal_codes:
             continue
@@ -1007,8 +1072,6 @@ def _first_signal_executable_date(
         if pos < config.screener.min_history_rows:
             continue
         if pd.Timestamp(history.iloc[pos]["date"]).normalize() != signal_ts.normalize():
-            continue
-        if pos + 1 >= len(history):
             continue
         latest = history.iloc[pos]
         if _finite_float(latest.get("amount")) < config.screener.min_amount:
@@ -1054,7 +1117,11 @@ def _first_signal_executable_date(
         "skipped_invalid_price": 0,
         "skipped_untradable_entry": 0,
         "skipped_limit_up_entry": 0,
+        "skipped_no_next_market_trade_date": 0,
+        "skipped_no_bar_on_next_market_trade_date": 0,
+        "skipped_no_t1_exit_bar": 0,
         "theme_limit_applied": False,
+        "target_entry_date": target_entry_ts.date().isoformat() if target_entry_ts is not None else "",
         "capital_used_before": round(current_capital_used, 2),
         "capital_used_after": round(current_capital_used, 2),
         "max_total_capital": round(max_total_capital, 2),
@@ -1082,6 +1149,21 @@ def _first_signal_executable_date(
             stats["skipped_daily_limit"] += 1
             continue
 
+        if target_entry_ts is None:
+            stats["skipped_no_next_market_trade_date"] += 1
+            continue
+
+        entry_pos = _history_pos_on_date(history, target_entry_ts)
+        if entry_pos is None:
+            stats["skipped_no_bar_on_next_market_trade_date"] += 1
+            continue
+        if entry_pos + 1 >= len(history):
+            stats["skipped_no_t1_exit_bar"] += 1
+            continue
+        if pd.Timestamp(history.iloc[entry_pos + 1]["date"]).normalize() > pd.Timestamp(end_ts).normalize():
+            stats["skipped_no_t1_exit_bar"] += 1
+            continue
+
         primary_tag = _primary_tag(candidate)
         if primary_tag and theme_limit > 0:
             stats["theme_limit_applied"] = True
@@ -1089,7 +1171,6 @@ def _first_signal_executable_date(
                 stats["skipped_theme_limit"] += 1
                 continue
 
-        entry_pos = pos + 1
         entry_row = history.iloc[entry_pos]
         raw_entry_price = _finite_float(entry_row.get("open"))
         if raw_entry_price <= 0:
@@ -1101,7 +1182,7 @@ def _first_signal_executable_date(
             continue
         previous_close = _finite_float(history.iloc[pos].get("close"))
         entry_low = _finite_float(entry_row.get("low"))
-        if previous_close > 0 and raw_entry_price >= previous_close * 1.095 and entry_low >= raw_entry_price * 0.999:
+        if _is_locked_limit_up_entry(candidate.code, candidate.name, previous_close, raw_entry_price, entry_low):
             stats["skipped_limit_up_entry"] += 1
             continue
         effective_entry_price = raw_entry_price * (1 + slip)
@@ -1111,8 +1192,12 @@ def _first_signal_executable_date(
             end_ts,
             effective_entry_price,
             stop_loss_fraction,
+            min_exit_pos=entry_pos + 1,
         )
         exit_row = history.iloc[exit_pos]
+        if pd.Timestamp(exit_row["date"]).normalize() <= pd.Timestamp(entry_row["date"]).normalize():
+            stats["skipped_no_t1_exit_bar"] += 1
+            continue
         if raw_exit_price <= 0:
             stats["skipped_invalid_price"] += 1
             continue
@@ -1141,7 +1226,10 @@ def _first_signal_executable_date(
         pnl = exit_value - invested - buy_fee - sell_fee
         ret = pnl / cash_needed if cash_needed > 0 else 0.0
         trade = {
+            "backtest_mode": "first_signal_executable",
+            "is_executable_backtest": True,
             "signal_date": signal_ts.date().isoformat(),
+            "target_entry_date": target_entry_ts.date().isoformat(),
             "entry_date": pd.Timestamp(entry_row["date"]).date().isoformat(),
             "exit_date": pd.Timestamp(exit_row["date"]).date().isoformat(),
             "exit_reason": exit_reason,
@@ -1271,11 +1359,16 @@ def _long_hold_exit(
     end_ts: pd.Timestamp,
     entry_price: float,
     stop_loss_fraction: float,
+    min_exit_pos: int | None = None,
 ) -> tuple[int, str, float]:
     end_pos = history["date"].searchsorted(end_ts, side="right") - 1
     end_pos = min(max(entry_pos, end_pos), len(history) - 1)
+    start_pos = entry_pos if min_exit_pos is None else max(entry_pos, min_exit_pos)
+    start_pos = min(start_pos, len(history) - 1)
+    if start_pos > end_pos:
+        return end_pos, "period_end", _finite_float(history.iloc[end_pos].get("close"))
     stop_price = entry_price * (1 - stop_loss_fraction)
-    for idx in range(entry_pos, end_pos + 1):
+    for idx in range(start_pos, end_pos + 1):
         low = _finite_float(history.iloc[idx].get("low"))
         close = _finite_float(history.iloc[idx].get("close"))
         if stop_loss_fraction > 0 and (low <= stop_price or close <= stop_price):
@@ -1394,8 +1487,23 @@ def _is_backtest_week_confirmed(
             other = pd.Timestamp(item).normalize()
             if other > ts and other.to_period("W-FRI") == week:
                 return False
+    if calendar is not None and not calendar.empty and not _calendar_covers_natural_week(ts, calendar):
+        return False
     trade_date = ts.date()
     return is_last_trade_day_of_week(trade_date, calendar if calendar is not None else pd.DataFrame())
+
+
+def _calendar_covers_natural_week(trade_ts: pd.Timestamp, calendar: pd.DataFrame) -> bool:
+    if calendar is None or calendar.empty or "cal_date" not in calendar.columns:
+        return False
+    cal_dates = pd.to_datetime(calendar["cal_date"], errors="coerce").dropna()
+    if cal_dates.empty:
+        return False
+    normalized = cal_dates.dt.normalize()
+    ts = pd.Timestamp(trade_ts).normalize()
+    monday = ts - pd.Timedelta(days=ts.weekday())
+    friday = monday + pd.Timedelta(days=4)
+    return bool(normalized.min() <= monday and normalized.max() >= friday)
 
 
 def _previous_week_already_broke_out(
@@ -2233,7 +2341,7 @@ __FIRST_SIGNAL_SUMMARY_CELLS__
     }
     function renderLongHoldTrades(id, rows) {
       const table = document.getElementById(id);
-      const executableRows = rows.some(row => row.shares !== undefined || row.capital_reserved !== undefined || row.buy_fee !== undefined || row.sell_fee !== undefined);
+      const executableRows = rows.some(row => row.backtest_mode === "first_signal_executable" || row.is_executable_backtest === true);
       table.innerHTML = executableRows
         ? "<thead><tr><th>信号日</th><th>买入日</th><th class='name'>股票</th><th>信号</th><th>排名</th><th>退出</th><th>买入</th><th>卖出</th><th>股数</th><th>费用</th><th>资金占用</th><th>市值</th><th>收益</th><th>收益率</th></tr></thead>"
         : "<thead><tr><th>信号日</th><th>买入日</th><th class='name'>股票</th><th>排名</th><th>退出</th><th>买入</th><th>卖出</th><th>投入</th><th>市值</th><th>收益</th><th>收益率</th></tr></thead>";
