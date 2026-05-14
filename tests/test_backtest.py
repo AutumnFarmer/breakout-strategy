@@ -10,7 +10,10 @@ from a_breakout_screener.backtest import (
     _long_hold_exit,
     _prepare_history,
     _run_first_signal_backtest,
+    _run_first_signal_executable_backtest,
+    _summarize_first_signal_executable,
     _summarize_long_hold,
+    calc_lot_position,
 )
 from a_breakout_screener.config import AppConfig, ScreenerConfig
 from a_breakout_screener.models import Candidate
@@ -115,6 +118,20 @@ def test_summarize_long_hold_totals_portfolio_result() -> None:
     assert row["stopped_trades"] == 1
 
 
+def test_calc_lot_position_rounds_down_to_whole_lots() -> None:
+    shares, invested = calc_lot_position(18.0, 100, 5000)
+
+    assert shares == 200
+    assert invested == pytest.approx(3600)
+
+
+def test_calc_lot_position_skips_when_one_lot_exceeds_budget() -> None:
+    shares, invested = calc_lot_position(60.0, 100, 5000)
+
+    assert shares == 0
+    assert invested == 0
+
+
 def test_first_signal_backtest_buys_same_stock_once(monkeypatch) -> None:
     dates = pd.bdate_range("2026-01-01", periods=8)
     history = pd.DataFrame(
@@ -162,3 +179,215 @@ def test_first_signal_backtest_buys_same_stock_once(monkeypatch) -> None:
     assert trades[0]["code"] == "000001"
     assert trades[0]["invested"] == 1000
     assert filters[-1]["held_unique_codes"] == 1
+
+
+def test_executable_first_signal_limits_daily_buys(monkeypatch, tmp_path) -> None:
+    dates = pd.bdate_range("2026-01-01", periods=5)
+    prepared_histories = tuple(_sample_prepared(f"{idx:06d}", dates) for idx in range(1, 11))
+    config = AppConfig(
+        screener=ScreenerConfig(min_history_rows=1, min_amount=1, min_price=1),
+        paths=SimpleNamespace(cache_dir=tmp_path),
+    )
+
+    def signal_on_second_day(prepared, pos, config, resistance=None):
+        if pos != 1:
+            return None
+        score = 100 - int(prepared.code)
+        return _candidate(prepared.code, prepared.name, score=score, signal_type="B")
+
+    monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", signal_on_second_day)
+
+    trades, filters = _run_first_signal_executable_backtest(
+        trading_dates=[pd.Timestamp(item) for item in dates],
+        prepared_histories=prepared_histories,
+        config=config,
+        lookback_days=30,
+        lot_size=100,
+        max_capital_per_trade=5000,
+        min_capital_per_trade=0,
+        max_buys_per_day=3,
+        max_theme_buys_per_day=99,
+        slippage_bps=0,
+        fee_bps=0,
+        stop_loss_pct=30,
+    )
+
+    assert len(trades) == 3
+    assert all(trade["shares"] % 100 == 0 for trade in trades)
+    assert max(int(row["new_buys"]) for row in filters) == 3
+    assert sum(int(row["skipped_daily_limit"]) for row in filters) == 7
+
+
+def test_executable_first_signal_limits_theme_buys(monkeypatch, tmp_path) -> None:
+    dates = pd.bdate_range("2026-01-01", periods=5)
+    prepared_histories = tuple(_sample_prepared(f"{idx:06d}", dates) for idx in range(1, 6))
+    config = AppConfig(
+        screener=ScreenerConfig(min_history_rows=1, min_amount=1, min_price=1),
+        paths=SimpleNamespace(cache_dir=tmp_path),
+    )
+
+    def same_theme_signal(prepared, pos, config, resistance=None):
+        if pos != 1:
+            return None
+        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="B", tags=("AI",))
+
+    monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", same_theme_signal)
+
+    trades, filters = _run_first_signal_executable_backtest(
+        trading_dates=[pd.Timestamp(item) for item in dates],
+        prepared_histories=prepared_histories,
+        config=config,
+        lookback_days=30,
+        lot_size=100,
+        max_capital_per_trade=5000,
+        min_capital_per_trade=0,
+        max_buys_per_day=10,
+        max_theme_buys_per_day=2,
+        slippage_bps=0,
+        fee_bps=0,
+        stop_loss_pct=30,
+    )
+
+    assert len(trades) == 2
+    assert {trade["primary_tag"] for trade in trades} == {"AI"}
+    assert sum(int(row["skipped_theme_limit"]) for row in filters) == 3
+    assert any(bool(row["theme_limit_applied"]) for row in filters)
+
+
+def test_executable_first_signal_slippage_and_fees_reduce_return(monkeypatch, tmp_path) -> None:
+    dates = pd.bdate_range("2026-01-01", periods=5)
+    prepared = _sample_prepared("000001", dates, entry_open=10.0, exit_close=12.0)
+    config = AppConfig(
+        screener=ScreenerConfig(min_history_rows=1, min_amount=1, min_price=1),
+        paths=SimpleNamespace(cache_dir=tmp_path),
+    )
+
+    def one_signal(prepared, pos, config, resistance=None):
+        if pos != 1:
+            return None
+        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="B")
+
+    monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", one_signal)
+
+    no_cost_trades, _ = _run_first_signal_executable_backtest(
+        trading_dates=[pd.Timestamp(item) for item in dates],
+        prepared_histories=(prepared,),
+        config=config,
+        lookback_days=30,
+        lot_size=100,
+        max_capital_per_trade=5000,
+        min_capital_per_trade=0,
+        max_buys_per_day=3,
+        max_theme_buys_per_day=2,
+        slippage_bps=0,
+        fee_bps=0,
+        stop_loss_pct=30,
+    )
+    cost_trades, filters = _run_first_signal_executable_backtest(
+        trading_dates=[pd.Timestamp(item) for item in dates],
+        prepared_histories=(prepared,),
+        config=config,
+        lookback_days=30,
+        lot_size=100,
+        max_capital_per_trade=5000,
+        min_capital_per_trade=0,
+        max_buys_per_day=3,
+        max_theme_buys_per_day=2,
+        slippage_bps=10,
+        fee_bps=3,
+        stop_loss_pct=30,
+    )
+
+    assert cost_trades[0]["return_pct"] < no_cost_trades[0]["return_pct"]
+    assert cost_trades[0]["buy_fee"] > 0
+    summary = _summarize_first_signal_executable(
+        pd.DataFrame(cost_trades),
+        first_signal_filter_rows=filters,
+        trading_dates=[pd.Timestamp(item) for item in dates],
+        lot_size=100,
+        max_capital_per_trade=5000,
+        min_capital_per_trade=0,
+        max_buys_per_day=3,
+        max_theme_buys_per_day=2,
+        slippage_bps=10,
+        fee_bps=3,
+        stop_loss_pct=30,
+        start_date="2026-01-01",
+        end_date="2026-01-07",
+    )
+    assert "peak_capital_used" in summary.columns
+    assert summary.iloc[0]["peak_capital_used"] > 0
+
+
+def test_executable_first_signal_counts_one_lot_too_expensive(monkeypatch, tmp_path) -> None:
+    dates = pd.bdate_range("2026-01-01", periods=5)
+    prepared = _sample_prepared("000001", dates, entry_open=60.0, exit_close=72.0)
+    config = AppConfig(
+        screener=ScreenerConfig(min_history_rows=1, min_amount=1, min_price=1),
+        paths=SimpleNamespace(cache_dir=tmp_path),
+    )
+
+    def one_signal(prepared, pos, config, resistance=None):
+        if pos != 1:
+            return None
+        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="B")
+
+    monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", one_signal)
+
+    trades, filters = _run_first_signal_executable_backtest(
+        trading_dates=[pd.Timestamp(item) for item in dates],
+        prepared_histories=(prepared,),
+        config=config,
+        lookback_days=30,
+        lot_size=100,
+        max_capital_per_trade=5000,
+        min_capital_per_trade=0,
+        max_buys_per_day=3,
+        max_theme_buys_per_day=2,
+        slippage_bps=0,
+        fee_bps=0,
+        stop_loss_pct=30,
+    )
+
+    assert trades == []
+    assert sum(int(row["skipped_one_lot_too_expensive"]) for row in filters) == 1
+
+
+def _sample_prepared(
+    code: str,
+    dates: pd.DatetimeIndex,
+    entry_open: float = 10.0,
+    exit_close: float = 12.0,
+) -> object:
+    history = pd.DataFrame(
+        {
+            "date": dates,
+            "open": [10.0, 10.0, entry_open, 11.0, 11.5],
+            "high": [11.0, 11.0, max(entry_open, 11.0), 12.5, 12.5],
+            "low": [9.5, 9.5, min(entry_open, 10.0), 10.5, 11.0],
+            "close": [10.0, 10.5, 11.0, 11.5, exit_close],
+            "volume": [1_000_000] * len(dates),
+            "amount": [100_000_000] * len(dates),
+        }
+    )
+    return _prepare_history(code, code, history)
+
+
+def _candidate(
+    code: str,
+    name: str,
+    score: float,
+    signal_type: str,
+    tags: tuple[str, ...] = (),
+) -> Candidate:
+    return Candidate(
+        code=code,
+        name=name,
+        latest_close=10.5,
+        resistance=10.0,
+        breakout_pct=0.05,
+        volume_ratio=2.0,
+        signal_type=signal_type,
+        score=score,
+        tags=tags,
+    )

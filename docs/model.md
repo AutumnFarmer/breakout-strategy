@@ -63,6 +63,26 @@
 
 邮件正文使用 Markdown 报告，附件包含 CSV、Excel 和 HTML 仪表盘。
 
+## 实盘化 first-signal 回测
+
+单独命令 `backtest-first-signal` 使用本地历史缓存做首次信号的实盘化近似回测，不会联网拉取行情:
+
+```bash
+uv run a-breakout --config config.toml backtest-first-signal \
+  --lot-size 100 \
+  --max-capital-per-trade 5000 \
+  --min-capital-per-trade 0 \
+  --max-buys-per-day 3 \
+  --max-theme-buys-per-day 2 \
+  --slippage-bps 10 \
+  --fee-bps 3
+```
+
+该模式按交易日回放 A/B/C1 首次信号，下一交易日开盘按 `lot_size` 整手买入；如果一手成本超过 `max_capital_per_trade` 则跳过。同一天最多新增 `max_buys_per_day` 只，同一主标签最多新增 `max_theme_buys_per_day` 只；主标签来自本地 `stock_tags` 缓存，缺失时不阻塞回测，汇总里会标明题材限额是否实际生效。
+
+输出的 `first_signal_trades.csv` 会同时保留原始开盘/卖出价、滑点后的有效成交价、整手数、实际投入、买卖费用和 PnL；`first_signal_summary.csv` 汇总总投入、总收益、胜率、止损率、最大持仓数、峰值资金占用和一手过贵跳过数量。手续费暂按 `fee_bps` 比例费率计算，未加入最低 5 元费用假设。
+
 ## 风险边界
 
 这是观察清单，不是自动交易系统。邮件里的买入区、止损位和仓位提示只用于二次判断，不应直接作为下单指令。
+实盘化回测仍然只是基于历史缓存的近似模拟，不是收益承诺；真实成交还会受到涨跌停、盘口深度、停牌、税费细则和人工执行延迟影响。

@@ -52,6 +52,10 @@ class PreparedHistory:
     weekly: pd.DataFrame
 
 
+SIGNAL_SORT_ORDER = {"A": 0, "B": 1, "C1": 2, "C2": 3, "C": 3, "D": 4}
+EXECUTABLE_BUY_SIGNAL_TYPES = {"A", "B", "C1"}
+
+
 def run_backtest(
     config: AppConfig,
     days: int = 252,
@@ -287,6 +291,112 @@ def run_first_signal_backtest(
         stock_count=len(histories),
         trade_count=len(trades),
     )
+
+
+def run_first_signal_executable_backtest(
+    config: AppConfig,
+    lookback_days: int = 365,
+    lot_size: int = 100,
+    max_capital_per_trade: float = 5000.0,
+    min_capital_per_trade: float = 0.0,
+    max_buys_per_day: int = 3,
+    max_theme_buys_per_day: int = 2,
+    slippage_bps: float = 10.0,
+    fee_bps: float = 3.0,
+    stop_loss_pct: float = 30.0,
+    symbols: set[str] | None = None,
+) -> FirstSignalBacktestResult:
+    histories = _load_histories(config.paths.cache_dir, symbols=symbols)
+    if not histories:
+        raise RuntimeError(f"没有可回测的历史缓存: {config.paths.cache_dir / 'hist'}")
+
+    names = _load_names_from_latest_daily(config.paths.cache_dir)
+    trading_dates = _common_trading_dates(histories)
+    if len(trading_dates) < config.screener.min_history_rows + 3:
+        raise RuntimeError("历史数据太少，无法回测")
+    prepared_histories = tuple(
+        _prepare_history(code, names.get(code, code), history, config.screener.ma_trend_period)
+        for code, history in histories.items()
+    )
+
+    end_ts = trading_dates[-1]
+    start_ts = end_ts - pd.Timedelta(days=lookback_days)
+    signal_dates = [ts for ts in trading_dates if ts >= start_ts and ts < end_ts]
+    trades, filter_rows = _run_first_signal_executable_backtest(
+        trading_dates=trading_dates,
+        prepared_histories=prepared_histories,
+        config=config,
+        lookback_days=lookback_days,
+        lot_size=lot_size,
+        max_capital_per_trade=max_capital_per_trade,
+        min_capital_per_trade=min_capital_per_trade,
+        max_buys_per_day=max_buys_per_day,
+        max_theme_buys_per_day=max_theme_buys_per_day,
+        slippage_bps=slippage_bps,
+        fee_bps=fee_bps,
+        stop_loss_pct=stop_loss_pct,
+    )
+    trades_df = pd.DataFrame(trades)
+    summary_df = _summarize_first_signal_executable(
+        trades_df,
+        first_signal_filter_rows=filter_rows,
+        trading_dates=trading_dates,
+        lot_size=lot_size,
+        max_capital_per_trade=max_capital_per_trade,
+        min_capital_per_trade=min_capital_per_trade,
+        max_buys_per_day=max_buys_per_day,
+        max_theme_buys_per_day=max_theme_buys_per_day,
+        slippage_bps=slippage_bps,
+        fee_bps=fee_bps,
+        stop_loss_pct=stop_loss_pct,
+        start_date=start_ts.date().isoformat(),
+        end_date=end_ts.date().isoformat(),
+    )
+
+    output_dir = config.paths.output_dir / "backtest" / date.today().isoformat()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    trades_path = output_dir / "first_signal_trades.csv"
+    summary_path = output_dir / "first_signal_summary.csv"
+    filters_path = output_dir / "first_signal_filters.csv"
+    html_path = output_dir / "backtest_report.html"
+    trades_df.to_csv(trades_path, index=False, encoding="utf-8-sig")
+    summary_df.to_csv(summary_path, index=False, encoding="utf-8-sig")
+    pd.DataFrame(filter_rows).to_csv(filters_path, index=False, encoding="utf-8-sig")
+    html_path.write_text(
+        _render_html(
+            pd.DataFrame(),
+            pd.DataFrame(),
+            len(signal_dates),
+            len(histories),
+            long_hold_summary_df=pd.DataFrame(),
+            long_hold_trades_df=pd.DataFrame(),
+            first_signal_summary_df=summary_df,
+            first_signal_trades_df=trades_df,
+        ),
+        encoding="utf-8",
+    )
+    return FirstSignalBacktestResult(
+        output_dir=output_dir,
+        trades_path=trades_path,
+        summary_path=summary_path,
+        filters_path=filters_path,
+        html_path=html_path,
+        signal_days=len(signal_dates),
+        stock_count=len(histories),
+        trade_count=len(trades),
+    )
+
+
+def calc_lot_position(entry_price: float, lot_size: int, max_capital: float) -> tuple[int, float]:
+    """Return shares and invested amount. If one lot exceeds max_capital, return (0, 0.0)."""
+    if entry_price <= 0 or lot_size <= 0 or max_capital <= 0:
+        return 0, 0.0
+    one_lot_cost = entry_price * lot_size
+    if one_lot_cost > max_capital:
+        return 0, 0.0
+    lots = int(max_capital // one_lot_cost)
+    shares = lots * lot_size
+    return shares, shares * entry_price
 
 
 def _backtest_signal_date(
@@ -719,6 +829,262 @@ def _first_signal_date(
     return trades, total_checked, passed
 
 
+def _run_first_signal_executable_backtest(
+    trading_dates: list[pd.Timestamp],
+    prepared_histories: tuple[PreparedHistory, ...],
+    config: AppConfig,
+    lookback_days: int,
+    lot_size: int,
+    max_capital_per_trade: float,
+    min_capital_per_trade: float,
+    max_buys_per_day: int,
+    max_theme_buys_per_day: int,
+    slippage_bps: float,
+    fee_bps: float,
+    stop_loss_pct: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if len(trading_dates) < config.screener.min_history_rows + 3:
+        return [], []
+    end_ts = trading_dates[-1]
+    start_ts = end_ts - pd.Timedelta(days=lookback_days)
+    signal_dates = [ts for ts in trading_dates if ts >= start_ts and ts < end_ts]
+    tag_map = _load_cached_tag_map(config.paths.cache_dir, {item.code for item in prepared_histories})
+    bought_codes: set[str] = set()
+    trades: list[dict[str, Any]] = []
+    filter_rows: list[dict[str, Any]] = []
+    stop_loss_fraction = max(0.0, stop_loss_pct) / 100
+    total = len(signal_dates)
+    for idx, signal_ts in enumerate(signal_dates, start=1):
+        day_trades, stats = _first_signal_executable_date(
+            signal_ts=signal_ts,
+            end_ts=end_ts,
+            prepared_histories=prepared_histories,
+            config=config,
+            bought_codes=bought_codes,
+            tag_map=tag_map,
+            lot_size=lot_size,
+            max_capital_per_trade=max_capital_per_trade,
+            min_capital_per_trade=min_capital_per_trade,
+            max_buys_per_day=max_buys_per_day,
+            max_theme_buys_per_day=max_theme_buys_per_day,
+            slippage_bps=slippage_bps,
+            fee_bps=fee_bps,
+            stop_loss_fraction=stop_loss_fraction,
+        )
+        trades.extend(day_trades)
+        filter_rows.append(
+            {
+                "signal_date": signal_ts.date().isoformat(),
+                **stats,
+                "held_unique_codes": len(bought_codes),
+            }
+        )
+        if idx == 1 or idx % 20 == 0 or idx == total:
+            print(f"首次信号实盘化回测进度: {idx}/{total} 个信号日", flush=True)
+    return trades, filter_rows
+
+
+def _first_signal_executable_date(
+    signal_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+    prepared_histories: tuple[PreparedHistory, ...],
+    config: AppConfig,
+    bought_codes: set[str],
+    tag_map: dict[str, tuple[str, ...]],
+    lot_size: int,
+    max_capital_per_trade: float,
+    min_capital_per_trade: float,
+    max_buys_per_day: int,
+    max_theme_buys_per_day: int,
+    slippage_bps: float,
+    fee_bps: float,
+    stop_loss_fraction: float,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    total_checked = 0
+    daily_candidates: list[tuple[Candidate, pd.DataFrame, int]] = []
+    for prepared in prepared_histories:
+        if prepared.code in bought_codes:
+            continue
+        history = prepared.history
+        pos = history["date"].searchsorted(signal_ts, side="right") - 1
+        if pos < config.screener.min_history_rows:
+            continue
+        if pd.Timestamp(history.iloc[pos]["date"]).normalize() != signal_ts.normalize():
+            continue
+        if pos + 1 >= len(history):
+            continue
+        latest = history.iloc[pos]
+        if _finite_float(latest.get("amount")) < config.screener.min_amount:
+            continue
+        if _finite_float(latest.get("close")) < config.screener.min_price:
+            continue
+        total_checked += 1
+        candidate = _evaluate_prepared_at_pos(prepared, pos, config)
+        if candidate:
+            cached_tags = tag_map.get(candidate.code, ())
+            if cached_tags and not candidate.tags:
+                candidate = candidate.with_tags(cached_tags)
+            daily_candidates.append((candidate, history, pos))
+
+    daily_candidates.sort(key=lambda item: _signal_sort_key(item[0]))
+    stats: dict[str, Any] = {
+        "total_checked": total_checked,
+        "raw_candidates": len(daily_candidates),
+        "passed": 0,
+        "new_buys": 0,
+        "skipped_unbuyable_signal_type": 0,
+        "skipped_daily_limit": 0,
+        "skipped_theme_limit": 0,
+        "skipped_one_lot_too_expensive": 0,
+        "skipped_below_min_capital": 0,
+        "skipped_invalid_price": 0,
+        "theme_limit_applied": False,
+    }
+    trades: list[dict[str, Any]] = []
+    theme_buys: dict[str, int] = {}
+    max_buys = max(1, int(max_buys_per_day))
+    theme_limit = max(0, int(max_theme_buys_per_day))
+    slip = max(0.0, slippage_bps) / 10000
+    fee = max(0.0, fee_bps) / 10000
+    for signal_rank, (candidate, history, pos) in enumerate(daily_candidates, start=1):
+        signal_type = candidate.signal_type
+        if signal_type not in EXECUTABLE_BUY_SIGNAL_TYPES:
+            stats["skipped_unbuyable_signal_type"] += 1
+            continue
+        stats["passed"] += 1
+        if len(trades) >= max_buys:
+            stats["skipped_daily_limit"] += 1
+            continue
+
+        primary_tag = _primary_tag(candidate)
+        if primary_tag and theme_limit > 0:
+            stats["theme_limit_applied"] = True
+            if theme_buys.get(primary_tag, 0) >= theme_limit:
+                stats["skipped_theme_limit"] += 1
+                continue
+
+        entry_pos = pos + 1
+        entry_row = history.iloc[entry_pos]
+        raw_entry_price = _finite_float(entry_row.get("open"))
+        if raw_entry_price <= 0:
+            stats["skipped_invalid_price"] += 1
+            continue
+        effective_entry_price = raw_entry_price * (1 + slip)
+        exit_pos, exit_reason, raw_exit_price = _long_hold_exit(
+            history,
+            entry_pos,
+            end_ts,
+            effective_entry_price,
+            stop_loss_fraction,
+        )
+        exit_row = history.iloc[exit_pos]
+        if raw_exit_price <= 0:
+            stats["skipped_invalid_price"] += 1
+            continue
+        effective_exit_price = raw_exit_price * (1 - slip)
+        shares, invested = calc_lot_position(
+            effective_entry_price,
+            lot_size=lot_size,
+            max_capital=max_capital_per_trade,
+        )
+        if shares <= 0:
+            stats["skipped_one_lot_too_expensive"] += 1
+            continue
+        if min_capital_per_trade > 0 and invested < min_capital_per_trade:
+            stats["skipped_below_min_capital"] += 1
+            continue
+
+        exit_value = shares * effective_exit_price
+        buy_fee = invested * fee
+        sell_fee = exit_value * fee
+        pnl = exit_value - invested - buy_fee - sell_fee
+        ret = pnl / invested if invested > 0 else 0.0
+        trade = {
+            "signal_date": signal_ts.date().isoformat(),
+            "entry_date": pd.Timestamp(entry_row["date"]).date().isoformat(),
+            "exit_date": pd.Timestamp(exit_row["date"]).date().isoformat(),
+            "exit_reason": exit_reason,
+            "signal_rank": signal_rank,
+            "rank": signal_rank,
+            "signal_type": signal_type,
+            "primary_tag": primary_tag,
+            "tags": " / ".join(candidate.tags),
+            "code": candidate.code,
+            "name": candidate.name,
+            "score": round(candidate.score, 4),
+            "breakout_pct": round(candidate.breakout_pct * 100, 4),
+            "volume_ratio": round(candidate.volume_ratio, 4),
+            "raw_entry_price": round(raw_entry_price, 4),
+            "effective_entry_price": round(effective_entry_price, 4),
+            "entry_price": round(effective_entry_price, 4),
+            "stop_price": round(effective_entry_price * (1 - stop_loss_fraction), 4),
+            "raw_exit_price": round(raw_exit_price, 4),
+            "effective_exit_price": round(effective_exit_price, 4),
+            "exit_price": round(effective_exit_price, 4),
+            "lot_size": int(lot_size),
+            "shares": int(shares),
+            "lots": int(shares // lot_size) if lot_size > 0 else 0,
+            "invested": round(invested, 2),
+            "exit_value": round(exit_value, 2),
+            "buy_fee": round(buy_fee, 2),
+            "sell_fee": round(sell_fee, 2),
+            "pnl": round(pnl, 2),
+            "return_pct": round(ret * 100, 4),
+            "slippage_bps": round(slippage_bps, 4),
+            "fee_bps": round(fee_bps, 4),
+            "max_capital_per_trade": round(max_capital_per_trade, 2),
+            "min_capital_per_trade": round(min_capital_per_trade, 2),
+            "entry_skipped_reason": "",
+        }
+        bought_codes.add(candidate.code)
+        if primary_tag:
+            theme_buys[primary_tag] = theme_buys.get(primary_tag, 0) + 1
+        trades.append(trade)
+        stats["new_buys"] += 1
+    return trades, stats
+
+
+def _signal_sort_key(candidate: Candidate) -> tuple[int, float, float, str]:
+    return (
+        SIGNAL_SORT_ORDER.get(candidate.signal_type, 9),
+        -candidate.score,
+        -candidate.volume_ratio,
+        candidate.code,
+    )
+
+
+def _primary_tag(candidate: Candidate) -> str:
+    return candidate.tags[0] if candidate.tags else ""
+
+
+def _load_cached_tag_map(cache_dir: Path, codes: set[str]) -> dict[str, tuple[str, ...]]:
+    tag_map: dict[str, tuple[str, ...]] = {}
+    tag_dir = cache_dir / "stock_tags"
+    for code in codes:
+        tags = _read_cached_tags(tag_dir / f"{code}.json")
+        if tags:
+            tag_map[code] = tags
+    return tag_map
+
+
+def _read_cached_tags(path: Path) -> tuple[str, ...]:
+    if not path.exists():
+        return ()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ()
+    raw_tags = payload.get("tags", [])
+    if not isinstance(raw_tags, list):
+        return ()
+    tags: list[str] = []
+    for item in raw_tags:
+        tag = str(item).strip()
+        if tag and tag not in tags:
+            tags.append(tag)
+    return tuple(tags)
+
+
 def _long_hold_exit(
     history: pd.DataFrame,
     entry_pos: int,
@@ -1098,6 +1464,136 @@ def _summarize_first_signal(
     )
 
 
+def _summarize_first_signal_executable(
+    trades_df: pd.DataFrame,
+    first_signal_filter_rows: list[dict[str, Any]],
+    trading_dates: list[pd.Timestamp],
+    lot_size: int,
+    max_capital_per_trade: float,
+    min_capital_per_trade: float,
+    max_buys_per_day: int,
+    max_theme_buys_per_day: int,
+    slippage_bps: float,
+    fee_bps: float,
+    stop_loss_pct: float,
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    signal_days = len(first_signal_filter_rows)
+    days_with_candidates = sum(1 for row in first_signal_filter_rows if int(row.get("raw_candidates", 0)) > 0)
+    total_passed = sum(int(row.get("passed", 0)) for row in first_signal_filter_rows)
+    skipped_one_lot = sum(int(row.get("skipped_one_lot_too_expensive", 0)) for row in first_signal_filter_rows)
+    skipped_daily_limit = sum(int(row.get("skipped_daily_limit", 0)) for row in first_signal_filter_rows)
+    skipped_theme_limit = sum(int(row.get("skipped_theme_limit", 0)) for row in first_signal_filter_rows)
+    skipped_below_min = sum(int(row.get("skipped_below_min_capital", 0)) for row in first_signal_filter_rows)
+    theme_limit_applied = any(bool(row.get("theme_limit_applied")) for row in first_signal_filter_rows)
+    base = {
+        "start_date": start_date,
+        "end_date": end_date,
+        "execution_mode": "executable_first_signal",
+        "duplicate_policy": "same_code_buy_once_after_execution",
+        "capital_per_trade": round(max_capital_per_trade, 2),
+        "max_buys_per_day": int(max_buys_per_day),
+        "max_theme_buys_per_day": int(max_theme_buys_per_day),
+        "lot_size": int(lot_size),
+        "max_capital_per_trade": round(max_capital_per_trade, 2),
+        "min_capital_per_trade": round(min_capital_per_trade, 2),
+        "slippage_bps": round(slippage_bps, 4),
+        "fee_bps": round(fee_bps, 4),
+        "stop_loss_pct": round(stop_loss_pct, 2),
+        "signal_days": signal_days,
+        "days_with_candidates": days_with_candidates,
+        "raw_first_signal_candidates": total_passed,
+        "theme_limit_applied": theme_limit_applied,
+        "skipped_one_lot_too_expensive": skipped_one_lot,
+        "skipped_daily_limit": skipped_daily_limit,
+        "skipped_theme_limit": skipped_theme_limit,
+        "skipped_below_min_capital": skipped_below_min,
+    }
+    if trades_df.empty:
+        return pd.DataFrame(
+            [
+                {
+                    **base,
+                    "trades": 0,
+                    "total_invested": 0.0,
+                    "ending_value": 0.0,
+                    "total_pnl": 0.0,
+                    "total_return_pct": 0.0,
+                    "win_rate_pct": 0.0,
+                    "stopped_trades": 0,
+                    "stop_loss_rate_pct": 0.0,
+                    "max_concurrent_positions": 0,
+                    "peak_capital_used": 0.0,
+                    "avg_invested_per_trade": 0.0,
+                    "total_buy_fee": 0.0,
+                    "total_sell_fee": 0.0,
+                    "total_fee": 0.0,
+                    "avg_return_pct": 0.0,
+                    "best_return_pct": 0.0,
+                    "worst_return_pct": 0.0,
+                }
+            ]
+        )
+
+    invested = trades_df["invested"].astype(float)
+    exit_value = trades_df["exit_value"].astype(float)
+    buy_fee = trades_df["buy_fee"].astype(float)
+    sell_fee = trades_df["sell_fee"].astype(float)
+    pnl = trades_df["pnl"].astype(float)
+    returns = trades_df["return_pct"].astype(float)
+    stopped = trades_df["exit_reason"].eq("stop_loss")
+    total_invested = float(invested.sum())
+    ending_value = float((exit_value - sell_fee).sum())
+    total_pnl = float(pnl.sum())
+    max_concurrent_positions, peak_capital_used = _capital_usage_metrics(trades_df, trading_dates)
+    return pd.DataFrame(
+        [
+            {
+                **base,
+                "trades": int(len(trades_df)),
+                "total_invested": round(total_invested, 2),
+                "ending_value": round(ending_value, 2),
+                "total_pnl": round(total_pnl, 2),
+                "total_return_pct": round(total_pnl / total_invested * 100 if total_invested > 0 else 0.0, 3),
+                "win_rate_pct": round(float((returns > 0).mean() * 100), 2),
+                "stopped_trades": int(stopped.sum()),
+                "stop_loss_rate_pct": round(float(stopped.mean() * 100), 2),
+                "max_concurrent_positions": max_concurrent_positions,
+                "peak_capital_used": round(peak_capital_used, 2),
+                "avg_invested_per_trade": round(float(invested.mean()), 2),
+                "total_buy_fee": round(float(buy_fee.sum()), 2),
+                "total_sell_fee": round(float(sell_fee.sum()), 2),
+                "total_fee": round(float(buy_fee.sum() + sell_fee.sum()), 2),
+                "avg_return_pct": round(float(returns.mean()), 3),
+                "best_return_pct": round(float(returns.max()), 3),
+                "worst_return_pct": round(float(returns.min()), 3),
+            }
+        ]
+    )
+
+
+def _capital_usage_metrics(trades_df: pd.DataFrame, trading_dates: list[pd.Timestamp]) -> tuple[int, float]:
+    if trades_df.empty:
+        return 0, 0.0
+    dates = [pd.Timestamp(ts).normalize() for ts in trading_dates]
+    counts: dict[pd.Timestamp, int] = {ts: 0 for ts in dates}
+    capital: dict[pd.Timestamp, float] = {ts: 0.0 for ts in dates}
+    for _, trade in trades_df.iterrows():
+        entry_ts = pd.Timestamp(trade["entry_date"]).normalize()
+        exit_ts = pd.Timestamp(trade["exit_date"]).normalize()
+        needed_cash = _finite_float(trade.get("invested")) + _finite_float(trade.get("buy_fee"))
+        active_dates = [ts for ts in dates if entry_ts <= ts <= exit_ts]
+        if not active_dates:
+            active_dates = [entry_ts]
+            counts.setdefault(entry_ts, 0)
+            capital.setdefault(entry_ts, 0.0)
+        for ts in active_dates:
+            counts[ts] = counts.get(ts, 0) + 1
+            capital[ts] = capital.get(ts, 0.0) + needed_cash
+    return max(counts.values(), default=0), max(capital.values(), default=0.0)
+
+
 def _max_drawdown(equity: pd.Series) -> float:
     if equity.empty:
         return 0.0
@@ -1189,7 +1685,7 @@ HTML_TEMPLATE = """<!doctype html>
   <main>
     <section>
       <h2>首次信号买入</h2>
-      <div class="note">口径：从一年前开始逐个交易日回放策略信号，A/B/C 类首次出现则下一交易日开盘买入；同一股票后续重复信号不重复买入；每只买入 1000 元，持有到最新交易日或触发设定止损。</div>
+      <div class="note">口径：从一年前开始逐个交易日回放策略信号，A/B/C1 类按信号、得分和量能排序，下一交易日开盘按整手和单票资金上限买入；限制每日新增买入和同主标签买入数，计入滑点、手续费，持有到最新交易日或触发设定止损。</div>
       <div class="wrap"><table id="firstSignalSummaryTable"></table></div>
     </section>
     <section>
@@ -1295,13 +1791,18 @@ HTML_TEMPLATE = """<!doctype html>
     }
     function renderFirstSignalSummary(rows) {
       const table = document.getElementById("firstSignalSummaryTable");
-      table.innerHTML = "<thead><tr><th>区间</th><th>单只买入</th><th>止损</th><th>信号日</th><th>有候选日</th><th>首次候选</th><th>买入数</th><th>总投入</th><th>期末/止损后市值</th><th>总收益</th><th>总收益率</th><th>胜率</th><th>止损数</th><th>止损率</th></tr></thead>";
+      table.innerHTML = "<thead><tr><th>区间</th><th>单票上限</th><th>一手</th><th>每日上限</th><th>题材上限</th><th>滑点bps</th><th>费率bps</th><th>止损</th><th>信号日</th><th>有候选日</th><th>首次候选</th><th>买入数</th><th>总投入</th><th>期末/止损后市值</th><th>总收益</th><th>总收益率</th><th>胜率</th><th>止损数</th><th>止损率</th><th>峰值占用</th></tr></thead>";
       const body = document.createElement("tbody");
       rows.forEach(row => {
         const tr = document.createElement("tr");
         tr.append(
           cell(`${row.start_date} ~ ${row.end_date}`),
-          cell(fmt(row.capital_per_trade, 0)),
+          cell(fmt(row.max_capital_per_trade ?? row.capital_per_trade, 0)),
+          cell(row.lot_size ?? "-"),
+          cell(row.max_buys_per_day ?? "-"),
+          cell(row.max_theme_buys_per_day ?? "-"),
+          cell(fmt(row.slippage_bps ?? 0, 1)),
+          cell(fmt(row.fee_bps ?? 0, 1)),
           cell(`${fmt(row.stop_loss_pct)}%`),
           cell(row.signal_days),
           cell(row.days_with_candidates),
@@ -1313,7 +1814,8 @@ HTML_TEMPLATE = """<!doctype html>
           signed(row.total_return_pct),
           cell(`${fmt(row.win_rate_pct)}%`),
           cell(row.stopped_trades),
-          cell(`${fmt(row.stop_loss_rate_pct)}%`)
+          cell(`${fmt(row.stop_loss_rate_pct)}%`),
+          cell(fmt(row.peak_capital_used ?? 0, 2))
         );
         body.appendChild(tr);
       });
