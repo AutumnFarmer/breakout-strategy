@@ -17,6 +17,7 @@ def write_html_dashboard(
     failed_count: int,
     latest_trade_date: str,
     ai_analysis: str = "",
+    pool_counts: dict[str, int] | None = None,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "breakout_dashboard.html"
@@ -26,6 +27,8 @@ def write_html_dashboard(
             "scannedCount": scanned_count,
             "failedCount": failed_count,
             "candidateCount": len(candidates),
+            "allCandidateCount": sum((pool_counts or {}).values()) if pool_counts else len(candidates),
+            "poolCounts": pool_counts or {},
         },
         "candidates": [_candidate_payload(idx, item) for idx, item in enumerate(candidates, start=1)],
         "history": {
@@ -57,6 +60,8 @@ def _candidate_payload(rank: int, item: Candidate) -> dict[str, Any]:
         "breakoutPct": round(item.breakout_pct * 100, 4),
         "volumeRatio": round(item.volume_ratio, 4),
         "volumeTrend": round(item.volume_trend, 4),
+        "activitySource": item.activity_source,
+        "activityRatio": round(item.activity_ratio or item.volume_ratio, 4),
         "touches": item.resistance_touches,
         "clusterSize": item.resistance_cluster_size,
         "atrPct": round(item.atr_pct * 100, 4),
@@ -459,7 +464,9 @@ HTML_TEMPLATE = """<!doctype html>
     <div class="stats">
       <div class="stat"><span>交易日</span><strong id="statDate"></strong></div>
       <div class="stat"><span>扫描股票</span><strong id="statScanned"></strong></div>
-      <div class="stat"><span>入选数量</span><strong id="statCandidates"></strong></div>
+      <div class="stat"><span>全量候选</span><strong id="statAllCandidates"></strong></div>
+      <div class="stat"><span>展示数量</span><strong id="statCandidates"></strong></div>
+      <div class="stat"><span>A/B/C1/C2/D</span><strong id="statPools"></strong></div>
       <div class="stat"><span>数据失败</span><strong id="statFailed"></strong></div>
     </div>
   </header>
@@ -485,7 +492,7 @@ HTML_TEMPLATE = """<!doctype html>
               <th>市值(亿)</th>
               <th>压力上沿</th>
               <th>突破</th>
-              <th>量比</th>
+              <th>成交倍数</th>
               <th>量趋势</th>
               <th>ATR%</th>
               <th>得分</th>
@@ -527,6 +534,7 @@ HTML_TEMPLATE = """<!doctype html>
         <div class="detail"><span>压力跨度</span><strong id="spanWeeks"></strong></div>
         <div class="detail"><span>买入区</span><strong id="buyZone"></strong></div>
         <div class="detail"><span>止损位</span><strong id="stopLoss"></strong></div>
+        <div class="detail"><span>量能口径</span><strong id="activitySource"></strong></div>
         <div class="detail"><span>阻力触达</span><strong id="touches"></strong></div>
         <div class="detail"><span>聚类大小</span><strong id="cluster"></strong></div>
         <div class="detail"><span>ATR%</span><strong id="atr"></strong></div>
@@ -575,7 +583,9 @@ HTML_TEMPLATE = """<!doctype html>
 
     document.getElementById("statDate").textContent = DASHBOARD.meta.latestTradeDate;
     document.getElementById("statScanned").textContent = DASHBOARD.meta.scannedCount;
+    document.getElementById("statAllCandidates").textContent = DASHBOARD.meta.allCandidateCount;
     document.getElementById("statCandidates").textContent = DASHBOARD.meta.candidateCount;
+    document.getElementById("statPools").textContent = ["A", "B", "C1", "C2", "D"].map(key => DASHBOARD.meta.poolCounts?.[key] || 0).join("/");
     document.getElementById("statFailed").textContent = DASHBOARD.meta.failedCount;
 
     function candidateByCode(code) {
@@ -683,7 +693,7 @@ HTML_TEMPLATE = """<!doctype html>
           item.circMv > 0 ? fmt(item.circMv, 1) : "-",
           fmt(item.zoneUpper || item.resistance),
           `${fmt(item.breakoutPct)}%`,
-          fmt(item.volumeRatio),
+          `${fmt(item.activityRatio || item.volumeRatio)} ${item.activitySource === "amount" ? "额" : "量"}`,
           fmt(item.volumeTrend),
           `${fmt(item.atrPct)}%`,
           fmt(item.score, 1),
@@ -795,7 +805,7 @@ HTML_TEMPLATE = """<!doctype html>
         document.getElementById("chartMeta").textContent = "";
         [
           "signalType", "tradeAction", "pressureZone", "spanWeeks",
-          "buyZone", "stopLoss", "touches", "cluster", "atr", "hoverInfo",
+          "buyZone", "stopLoss", "activitySource", "touches", "cluster", "atr", "hoverInfo",
           "financialDate", "growthScore", "revenueYoy", "profitYoy", "roe", "tagDetail"
         ].forEach(id => {
           document.getElementById(id).textContent = "-";
@@ -815,6 +825,7 @@ HTML_TEMPLATE = """<!doctype html>
       document.getElementById("spanWeeks").textContent = item.spanWeeks ? `${item.spanWeeks} 周` : "-";
       document.getElementById("buyZone").textContent = `${fmt(item.buyLow)} - ${fmt(item.buyHigh)}`;
       document.getElementById("stopLoss").textContent = `${fmt(item.tradeStopLoss || item.stopLoss)} / 结构 ${fmt(item.structureStopLoss || item.stopLoss)}`;
+      document.getElementById("activitySource").textContent = `${item.activitySource === "amount" ? "成交额" : "成交量"} / ${fmt(item.activityRatio || item.volumeRatio)}倍`;
       document.getElementById("touches").textContent = `${item.touches} 次`;
       document.getElementById("cluster").textContent = `${item.clusterSize || "-"} 根K线`;
       document.getElementById("atr").textContent = `${fmt(item.atrPct)}%`;

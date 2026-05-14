@@ -179,6 +179,21 @@ def test_fetch_tushare_daily_range_parallel_writes_date_cache(monkeypatch, tmp_p
         assert (tmp_path / "tushare_daily" / f"{trade_date}.csv").exists()
 
 
+def test_thursday_is_not_weekly_confirmed_without_calendar() -> None:
+    assert not data.is_last_trade_day_of_week(date(2026, 5, 7), pd.DataFrame())
+
+
+def test_holiday_short_week_last_open_day_can_confirm() -> None:
+    calendar = pd.DataFrame(
+        {
+            "cal_date": pd.to_datetime(["2026-05-06", "2026-05-07", "2026-05-08"]),
+            "is_open": [True, True, False],
+        }
+    )
+
+    assert data.is_last_trade_day_of_week(date(2026, 5, 7), calendar)
+
+
 def test_fetch_stock_tags_filters_generic_tags_and_uses_cache(monkeypatch, tmp_path) -> None:
     class FakePro:
         def __init__(self) -> None:

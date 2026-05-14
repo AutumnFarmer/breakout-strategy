@@ -29,7 +29,13 @@ class PressureZone:
 ResistanceInfo = PressureZone
 
 
-def evaluate_stock(code: str, name: str, history: pd.DataFrame, params: ScreenerConfig) -> Candidate | None:
+def evaluate_stock(
+    code: str,
+    name: str,
+    history: pd.DataFrame,
+    params: ScreenerConfig,
+    is_week_confirmed: bool = False,
+) -> Candidate | None:
     if len(history) < params.min_history_rows:
         return None
     daily = history.sort_values("date").reset_index(drop=True).copy()
@@ -61,8 +67,9 @@ def evaluate_stock(code: str, name: str, history: pd.DataFrame, params: Screener
     ma10 = float(daily["close"].tail(10).mean())
     ma20 = float(daily["close"].tail(20).mean())
     ma_trend = float(daily["close"].tail(params.ma_trend_period).mean()) if params.ma_trend_period > 0 and len(daily) >= params.ma_trend_period else float("nan")
-    volume_ratio = _volume_ratio(daily)
-    volume_trend = _volume_trend(daily)
+    activity_ratio, activity_source = _activity_ratio(daily)
+    volume_ratio = activity_ratio
+    volume_trend = _activity_trend(daily)
     monthly_span_pct = _monthly_span_pct(daily)
     weekly_span_mean = _weekly_span_mean(weekly, params.consolidation_weeks, latest["date"]) if params.consolidation_weeks > 0 else 0.0
     atr_pct = _calc_atr(daily)
@@ -86,6 +93,7 @@ def evaluate_stock(code: str, name: str, history: pd.DataFrame, params: Screener
         ma_trend=ma_trend,
         volume_ratio=volume_ratio,
         volume_trend=volume_trend,
+        activity_source=activity_source,
         monthly_span_pct=monthly_span_pct,
         weekly_span_mean=weekly_span_mean,
         atr_pct=atr_pct,
@@ -94,7 +102,7 @@ def evaluate_stock(code: str, name: str, history: pd.DataFrame, params: Screener
         last_resistance_date=pressure_zone.last_touch_date,
         latest_trade_date=latest["date"].date(),
         confirmation_closes=list(daily["close"].tail(params.confirmation_bars)) if params.confirmation_bars > 0 else [],
-        is_week_confirmed=_is_last_observed_trade_day_of_week(daily, latest["date"]),
+        is_week_confirmed=is_week_confirmed,
         params=params,
     )
 
@@ -128,6 +136,7 @@ def assess_candidate(
     span_weeks: int = 0,
     recent_low: float = 0.0,
     is_week_confirmed: bool = False,
+    activity_source: str = "",
 ) -> Candidate | None:
     zone_low = resistance if zone_low is None else zone_low
     zone_mid = resistance if zone_mid is None else zone_mid
@@ -193,6 +202,8 @@ def assess_candidate(
         breakout_pct=breakout_pct,
         volume_ratio=volume_ratio,
         volume_trend=volume_trend,
+        activity_source=activity_source,
+        activity_ratio=volume_ratio,
         resistance_touches=resistance_touches,
         resistance_cluster_size=resistance_cluster_size,
         signal_type=signal_type,
@@ -239,6 +250,8 @@ def calc_pressure_zone(
     prior = weekly[weekly["week_end"] < cutoff_week_end].tail(lookback_weeks).reset_index(drop=True)
     if len(prior) < max(12, pivot_k * 2 + 6):
         return None
+    prior = prior.copy()
+    prior["touch_price"] = prior.apply(_effective_touch_price, axis=1)
 
     pivots = _pivot_highs(prior, pivot_k=pivot_k)
     if not pivots:
@@ -270,7 +283,8 @@ def calc_pressure_zone(
         zone_low = zone_mid * (1 - cluster_tolerance)
         zone_upper = zone_mid * (1 + cluster_tolerance)
         touch_rows = prior[
-            (prior["high"] >= zone_low * (1 - touch_tolerance))
+            (prior["touch_price"] >= zone_low * (1 - touch_tolerance))
+            & (prior["touch_price"] <= zone_upper * (1 + touch_tolerance))
             & (prior["close"] <= zone_upper * (1 + effective_breakout_pct))
         ]
         independent = _independent_touches(touch_rows, min_gap_weeks=min_touch_gap_weeks)
@@ -334,8 +348,9 @@ def _pivot_highs(weekly: pd.DataFrame, pivot_k: int) -> list[tuple[float, pd.Tim
         high = float(highs[idx])
         if not np.isfinite(high) or high <= 0:
             continue
-        window = highs[idx - pivot_k : idx + pivot_k + 1]
-        if high < float(np.nanmax(window)):
+        left = highs[idx - pivot_k : idx]
+        right = highs[idx + 1 : idx + pivot_k + 1]
+        if high <= float(np.nanmax(left)) or high <= float(np.nanmax(right)):
             continue
         row = weekly.iloc[idx]
         pivots.append((_adjusted_pivot_price(row), pd.Timestamp(row["week_end"])))
@@ -343,6 +358,10 @@ def _pivot_highs(weekly: pd.DataFrame, pivot_k: int) -> list[tuple[float, pd.Tim
 
 
 def _adjusted_pivot_price(row: pd.Series) -> float:
+    return _effective_touch_price(row)
+
+
+def _effective_touch_price(row: pd.Series) -> float:
     high = float(row["high"])
     low = float(row["low"])
     open_ = float(row["open"])
@@ -464,16 +483,26 @@ def _weekly_span_mean(weekly: pd.DataFrame, weeks: int, latest_ts: pd.Timestamp)
     return float(spans.mean())
 
 
-def _volume_ratio(daily: pd.DataFrame) -> float:
-    latest_volume = float(daily.iloc[-1].get("volume", 0) or 0)
-    baseline = float(daily["volume"].tail(20).iloc[:-1].mean())
+def _activity_series(daily: pd.DataFrame) -> tuple[pd.Series, str]:
+    amount = pd.to_numeric(daily.get("amount", pd.Series(index=daily.index)), errors="coerce").fillna(0)
+    volume = pd.to_numeric(daily.get("volume", pd.Series(index=daily.index)), errors="coerce").fillna(0)
+    if len(amount) >= 20 and float(amount.tail(20).mean()) > 0:
+        return amount, "amount"
+    return volume, "volume"
+
+
+def _activity_ratio(daily: pd.DataFrame) -> tuple[float, str]:
+    activity, source = _activity_series(daily)
+    latest_activity = float(activity.iloc[-1])
+    baseline = float(activity.tail(20).iloc[:-1].mean())
     if baseline <= 0 or not np.isfinite(baseline):
-        return 0.0
-    return latest_volume / baseline
+        return 0.0, source
+    return latest_activity / baseline, source
 
 
-def _volume_trend(daily: pd.DataFrame) -> float:
-    tail = daily["volume"].tail(20)
+def _activity_trend(daily: pd.DataFrame) -> float:
+    activity, _ = _activity_series(daily)
+    tail = activity.tail(20)
     short = float(tail.iloc[-5:].mean())
     long = float(tail.iloc[:-1].mean())
     if long <= 0 or not np.isfinite(long):
@@ -545,17 +574,11 @@ def _classify_signal(
         return "B", "日线预警，周线或量能仍需确认", "只预警观察，等待周线确认"
     if breakout_pct <= params.max_buy_extension:
         return "B", "突破偏高但仍在谨慎观察区", "谨慎观察，不主动追高"
-    return "C", "距离压力区过远", "不追"
-
-
-def _is_last_observed_trade_day_of_week(daily: pd.DataFrame, latest_ts: object) -> bool:
-    latest = pd.Timestamp(latest_ts).normalize()
-    dates = pd.to_datetime(daily["date"], errors="coerce").dropna().dt.normalize().sort_values()
-    same_week = dates[dates.dt.to_period("W-FRI") == latest.to_period("W-FRI")]
-    if same_week.empty:
-        return False
-    # This is local-data based. A later data-layer change can replace it with the exchange trade calendar.
-    return latest == same_week.iloc[-1] and latest.weekday() >= 3
+    if breakout_pct <= params.max_extension:
+        if volume_ratio >= params.strong_volume_ratio:
+            return "C1", "强趋势突破，已远离低风险买点，但可进入右尾观察", "强趋势观察，小仓或等回踩"
+        return "C2", "距离压力区过远且量能确认不足", "不追"
+    return "D", "突破过远，风险收益比失衡", "排除"
 
 
 def _piecewise(x: float, points: list[tuple[float, float]]) -> float:
@@ -574,6 +597,8 @@ def _position_hint(signal_type: str, signal_reason: str) -> str:
         return f"A类周线确认：{signal_reason}；单票初始仓位按总资产0.5%-1%控制"
     if signal_type == "B":
         return f"B类日线预警：{signal_reason}；只观察或小仓试错"
-    if signal_type == "C":
-        return f"C类不追：{signal_reason}；等待回踩或重新整理"
+    if signal_type == "C1":
+        return f"C1类强趋势观察：{signal_reason}；不属于低风险买点，只适合右尾长持池"
+    if signal_type in {"C2", "C"}:
+        return f"C2类不追：{signal_reason}；等待回踩或重新整理"
     return f"D类排除：{signal_reason}"

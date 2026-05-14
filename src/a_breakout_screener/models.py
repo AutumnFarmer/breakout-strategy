@@ -13,6 +13,8 @@ class Candidate:
     breakout_pct: float
     volume_ratio: float
     volume_trend: float = 0.0
+    activity_source: str = ""
+    activity_ratio: float = 0.0
     resistance_touches: int = 0
     resistance_cluster_size: int = 0
     signal_type: str = "D"
@@ -62,6 +64,8 @@ class Candidate:
             "阻力位": round(self.resistance, 2),
             "突破幅度%": round(self.breakout_pct * 100, 2),
             "量能比": round(self.volume_ratio, 2),
+            "量能来源": self.activity_source,
+            "成交/量能倍数": round(self.activity_ratio or self.volume_ratio, 2),
             "量能趋势": round(self.volume_trend, 2),
             "阻力触达次数": self.resistance_touches,
             "阻力聚类大小": self.resistance_cluster_size,

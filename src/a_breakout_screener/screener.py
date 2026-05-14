@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -18,7 +18,9 @@ from .data import (
     fetch_index_history,
     fetch_spot,
     fetch_stock_tags,
+    fetch_trade_calendar,
     filter_spot_universe,
+    is_last_trade_day_of_week,
     prepare_history_cache,
 )
 from .html_report import write_html_dashboard
@@ -38,6 +40,8 @@ class ScanResult:
     scanned_count: int
     failed_count: int
     latest_trade_date: str
+    all_candidate_count: int = 0
+    pool_counts: dict[str, int] = field(default_factory=dict)
 
 
 def run_scan(
@@ -56,6 +60,11 @@ def run_scan(
     output_dir = config.paths.output_dir / end_date.isoformat()
     output_dir.mkdir(parents=True, exist_ok=True)
     config.paths.cache_dir.mkdir(parents=True, exist_ok=True)
+    calendar = fetch_trade_calendar(
+        start_date=start_date - timedelta(days=14),
+        end_date=end_date + timedelta(days=14),
+        cache_dir=config.paths.cache_dir,
+    )
 
     # Check market regime before scanning.
     if config.screener.market_regime != "all" and not symbols:
@@ -103,6 +112,7 @@ def run_scan(
                 end_date,
                 config,
                 force_refresh,
+                calendar,
             ): (row["code"], row["name"])
             for _, row in universe.iterrows()
         }
@@ -117,7 +127,10 @@ def run_scan(
             except Exception as exc:  # pragma: no cover - external data source failures vary
                 failures.append((code, name, str(exc)))
 
-    candidates = _sort_candidates(candidates)[: config.screener.top_n]
+    all_candidates = _sort_candidates(candidates)
+    pools = _split_candidate_pools(all_candidates)
+    pool_counts = {key: len(items) for key, items in pools.items()}
+    candidates = _select_display_candidates(pools, config.screener.top_n)
     circ_mv_map: dict[str, float] = {}
     if candidates:
         trade_date_str = candidates[0].latest_trade_date.strftime("%Y%m%d")
@@ -150,6 +163,8 @@ def run_scan(
         failed_count=len(failures),
         latest_trade_date=latest_trade_date,
         ai_analysis=ai_analysis,
+        pools=pools,
+        pool_counts=pool_counts,
     )
     ai_analysis_path = output_dir / "ai_analysis.md" if ai_analysis else None
     _write_failures(output_dir / "failures.csv", failures)
@@ -164,6 +179,8 @@ def run_scan(
         scanned_count=len(universe),
         failed_count=len(failures),
         latest_trade_date=latest_trade_date,
+        all_candidate_count=len(all_candidates),
+        pool_counts=pool_counts,
     )
 
 
@@ -175,6 +192,8 @@ def write_outputs(
     failed_count: int,
     latest_trade_date: str,
     ai_analysis: str = "",
+    pools: dict[str, list[Candidate]] | None = None,
+    pool_counts: dict[str, int] | None = None,
 ) -> tuple[Path, Path, Path, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     rows = [candidate.to_chinese_dict() for candidate in candidates]
@@ -184,8 +203,20 @@ def write_outputs(
     markdown_path = output_dir / "breakout_report.md"
     df.to_csv(csv_path, index=False, encoding="utf-8-sig")
     with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="突破候选")
-    markdown = render_markdown_report(candidates, scanned_count, failed_count, latest_trade_date)
+        df.to_excel(writer, index=False, sheet_name="展示候选")
+        for pool_name, items in (pools or {}).items():
+            pd.DataFrame([item.to_chinese_dict() for item in items]).to_excel(
+                writer,
+                index=False,
+                sheet_name=f"{pool_name}类"[:31],
+            )
+    for pool_name, items in (pools or {}).items():
+        pd.DataFrame([item.to_chinese_dict() for item in items]).to_csv(
+            output_dir / f"breakout_{pool_name}.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
+    markdown = render_markdown_report(candidates, scanned_count, failed_count, latest_trade_date, pool_counts=pool_counts)
     if ai_analysis:
         markdown += "\n## AI选股分析员\n\n" + ai_analysis.strip() + "\n"
         (output_dir / "ai_analysis.md").write_text(ai_analysis.strip() + "\n", encoding="utf-8")
@@ -198,6 +229,7 @@ def write_outputs(
         failed_count=failed_count,
         latest_trade_date=latest_trade_date,
         ai_analysis=ai_analysis,
+        pool_counts=pool_counts,
     )
     return csv_path, xlsx_path, markdown_path, html_path
 
@@ -207,18 +239,23 @@ def render_markdown_report(
     scanned_count: int,
     failed_count: int,
     latest_trade_date: str,
+    pool_counts: dict[str, int] | None = None,
 ) -> str:
+    pool_counts = pool_counts or {}
+    all_candidate_count = sum(pool_counts.values()) if pool_counts else len(candidates)
     lines = [
         f"# A股突破选股日报 {latest_trade_date}",
         "",
         f"- 扫描股票数: {scanned_count}",
         f"- 数据失败数: {failed_count}",
-        f"- 候选总数: {len(candidates)}",
-        f"- A类周线确认: {sum(1 for item in candidates if item.signal_type == 'A')}",
-        f"- B类日线预警: {sum(1 for item in candidates if item.signal_type == 'B')}",
-        f"- C类突破不追: {sum(1 for item in candidates if item.signal_type == 'C')}",
-        f"- D类突破不足: {sum(1 for item in candidates if item.signal_type == 'D')}",
-        f"- 今日可交易观察: {sum(1 for item in candidates if item.signal_type == 'A')}",
+        f"- 全量候选总数: {all_candidate_count}",
+        f"- 展示候选数: {len(candidates)}",
+        f"- A类周线确认: {pool_counts.get('A', 0)}",
+        f"- B类日线预警: {pool_counts.get('B', 0)}",
+        f"- C1强趋势观察: {pool_counts.get('C1', 0)}",
+        f"- C2突破不追: {pool_counts.get('C2', 0)}",
+        f"- D类排除/突破不足: {pool_counts.get('D', 0)}",
+        f"- 今日可交易观察: {pool_counts.get('A', 0)}",
         "",
         "说明: 这是规则筛选和风险观察清单，不是投资建议。请结合大盘环境、行业事件和个人仓位做二次判断。",
         "",
@@ -319,7 +356,7 @@ def _fmt_optional(value: float | None) -> str:
 
 
 def _sort_candidates(candidates: list[Candidate]) -> list[Candidate]:
-    signal_order = {"A": 0, "B": 1, "C": 2, "D": 3}
+    signal_order = {"A": 0, "B": 1, "C1": 2, "C2": 3, "C": 3, "D": 4}
     return sorted(
         candidates,
         key=lambda item: (
@@ -331,6 +368,26 @@ def _sort_candidates(candidates: list[Candidate]) -> list[Candidate]:
     )
 
 
+def _split_candidate_pools(candidates: list[Candidate]) -> dict[str, list[Candidate]]:
+    pools: dict[str, list[Candidate]] = {"A": [], "B": [], "C1": [], "C2": [], "D": []}
+    for item in candidates:
+        key = item.signal_type if item.signal_type in pools else "D"
+        if item.signal_type == "C":
+            key = "C2"
+        pools[key].append(item)
+    return {key: _sort_candidates(items) for key, items in pools.items()}
+
+
+def _select_display_candidates(pools: dict[str, list[Candidate]], top_n: int) -> list[Candidate]:
+    selected: list[Candidate] = []
+    selected.extend(pools.get("A", [])[:10])
+    selected.extend(pools.get("B", [])[: max(10, top_n)])
+    selected.extend(pools.get("C1", [])[:10])
+    selected.extend(pools.get("C2", [])[:5])
+    selected.extend(pools.get("D", [])[:5])
+    return selected[: max(top_n, 30)]
+
+
 def _check_one(
     code: str,
     name: str,
@@ -338,6 +395,7 @@ def _check_one(
     end_date,
     config: AppConfig,
     force_refresh: bool,
+    calendar: pd.DataFrame,
 ) -> tuple[Candidate, pd.DataFrame] | None:
     history = fetch_history(
         symbol=code,
@@ -347,7 +405,17 @@ def _check_one(
         force_refresh=force_refresh,
         allow_truncated_start=True,
     )
-    candidate = evaluate_stock(code=code, name=name, history=history, params=config.screener)
+    if history.empty:
+        return None
+    latest_trade_date = pd.Timestamp(history.sort_values("date").iloc[-1]["date"]).date()
+    week_confirmed = is_last_trade_day_of_week(latest_trade_date, calendar)
+    candidate = evaluate_stock(
+        code=code,
+        name=name,
+        history=history,
+        params=config.screener,
+        is_week_confirmed=week_confirmed,
+    )
     if not candidate:
         return None
     return candidate, history
@@ -422,7 +490,7 @@ def _write_blocked_result(output_dir: Path, reason: str, latest_trade_date: str)
         encoding="utf-8",
     )
     cols = ["代码", "名称", "信号类型", "信号说明", "最新收盘", "压力区下沿", "压力区中枢", "压力区上沿",
-            "阻力位", "突破幅度%", "量能比", "量能趋势", "阻力触达次数", "阻力聚类大小", "压力跨度周",
+            "阻力位", "突破幅度%", "量能比", "量能来源", "成交/量能倍数", "量能趋势", "阻力触达次数", "阻力聚类大小", "压力跨度周",
             "月线跨度%", "ATR%", "MA10", "MA20", "得分", "首次阻力日期", "最近阻力日期",
             "最新交易日", "建议买入区", "止损位", "交易止损", "结构止损", "流通市值(亿)",
             "总资产建议仓位", "策略内建议仓位", "最大允许亏损", "交易结论", "仓位提示", "题材标签",

@@ -280,6 +280,90 @@ def prepare_history_cache(
     return written, rows
 
 
+def fetch_trade_calendar(
+    start_date: date,
+    end_date: date,
+    cache_dir: Path,
+) -> pd.DataFrame:
+    """Fetch A-share exchange calendar with cal_date/is_open columns.
+
+    The screener treats an empty calendar conservatively: only Friday can be
+    considered a complete weekly confirmation.
+    """
+    cache_path = cache_dir / "trade_cal" / f"{start_date:%Y%m%d}_{end_date:%Y%m%d}.csv"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cached = _read_trade_calendar_cache(cache_path)
+    if not cached.empty:
+        return cached
+    if not _tushare_enabled():
+        return pd.DataFrame(columns=["cal_date", "is_open"])
+
+    from .tushare_client import get_tushare_pro
+
+    try:
+        pro = get_tushare_pro()
+        raw = _call_tushare(
+            "trade_cal",
+            lambda: pro.trade_cal(
+                exchange="SSE",
+                start_date=start_date.strftime("%Y%m%d"),
+                end_date=end_date.strftime("%Y%m%d"),
+                fields="cal_date,is_open",
+            ),
+        )
+    except Exception as exc:  # pragma: no cover - external data source variance
+        warnings.warn(f"Tushare trade calendar fetch failed; weekly confirmation falls back to Friday: {exc}", RuntimeWarning)
+        return pd.DataFrame(columns=["cal_date", "is_open"])
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=["cal_date", "is_open"])
+
+    calendar = _normalize_trade_calendar(raw)
+    if not calendar.empty:
+        calendar.to_csv(cache_path, index=False)
+    return calendar
+
+
+def is_last_trade_day_of_week(trade_date: date, calendar: pd.DataFrame) -> bool:
+    """Return True when trade_date is the last open A-share day in its natural week."""
+    if calendar is None or calendar.empty:
+        return trade_date.weekday() == 4
+
+    cal = _normalize_trade_calendar(calendar)
+    cal = cal[cal["is_open"]]
+    if cal.empty:
+        return trade_date.weekday() == 4
+
+    ts = pd.Timestamp(trade_date).normalize()
+    same_week = cal[cal["cal_date"].dt.to_period("W-FRI") == ts.to_period("W-FRI")]
+    if same_week.empty:
+        return trade_date.weekday() == 4
+    return ts == same_week["cal_date"].max().normalize()
+
+
+def _read_trade_calendar_cache(cache_path: Path) -> pd.DataFrame:
+    if not cache_path.exists():
+        return pd.DataFrame(columns=["cal_date", "is_open"])
+    try:
+        return _normalize_trade_calendar(pd.read_csv(cache_path))
+    except Exception as exc:  # pragma: no cover - corrupt local cache path
+        warnings.warn(f"discarding invalid trade calendar cache {cache_path}: {exc}", RuntimeWarning)
+        return pd.DataFrame(columns=["cal_date", "is_open"])
+
+
+def _normalize_trade_calendar(raw: pd.DataFrame) -> pd.DataFrame:
+    if raw is None or raw.empty:
+        return pd.DataFrame(columns=["cal_date", "is_open"])
+    df = raw.copy()
+    if "cal_date" not in df.columns or "is_open" not in df.columns:
+        return pd.DataFrame(columns=["cal_date", "is_open"])
+    df["cal_date"] = pd.to_datetime(df["cal_date"], format="%Y%m%d", errors="coerce")
+    if df["cal_date"].isna().all():
+        df["cal_date"] = pd.to_datetime(raw["cal_date"], errors="coerce")
+    df["is_open"] = pd.to_numeric(df["is_open"], errors="coerce").fillna(0).astype(int).astype(bool)
+    return df.dropna(subset=["cal_date"]).sort_values("cal_date").reset_index(drop=True)[["cal_date", "is_open"]]
+
+
 def _fetch_history_from_source(symbol: str, start_date: date, end_date: date) -> pd.DataFrame:
     if _tushare_enabled():
         try:

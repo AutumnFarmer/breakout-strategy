@@ -19,6 +19,9 @@ cp "$LATEST_DIR/breakout_report.md" "$SITE_DIR/breakout_report.md" 2>/dev/null |
 cp "$LATEST_DIR/ai_analysis.md" "$SITE_DIR/ai_analysis.md" 2>/dev/null || true
 cp "$LATEST_DIR/breakout_candidates.csv" "$SITE_DIR/breakout_candidates.csv" 2>/dev/null || true
 cp "$LATEST_DIR/breakout_candidates.xlsx" "$SITE_DIR/breakout_candidates.xlsx" 2>/dev/null || true
+for pool in A B C1 C2 D; do
+  cp "$LATEST_DIR/breakout_${pool}.csv" "$SITE_DIR/breakout_${pool}.csv" 2>/dev/null || true
+done
 basename "$LATEST_DIR" > "$SITE_DIR/latest_trade_date.txt"
 
 LATEST_BACKTEST="$(find "$APP_DIR/outputs/backtest" -mindepth 2 -maxdepth 2 -name backtest_report.html 2>/dev/null | sort | tail -1 || true)"

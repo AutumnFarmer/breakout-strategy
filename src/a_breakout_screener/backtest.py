@@ -600,7 +600,7 @@ def _first_signal_for_stock(
         if breakout_pct < config.screener.breakout_buffer or breakout_pct > config.screener.max_extension:
             continue
         candidate = _evaluate_prepared_at_pos(prepared, pos, config, resistance=resistance)
-        if not candidate or candidate.signal_type not in {"A", "B", "C"}:
+        if not candidate or candidate.signal_type not in {"A", "B", "C", "C1", "C2"}:
             continue
 
         signal_rank += 1
@@ -670,7 +670,7 @@ def _first_signal_date(
             continue
         total_checked += 1
         candidate = _evaluate_prepared_at_pos(prepared, pos, config)
-        if candidate and candidate.signal_type in {"A", "B", "C"}:
+        if candidate and candidate.signal_type in {"A", "B", "C", "C1", "C2"}:
             daily_candidates.append((candidate, history, pos))
 
     daily_candidates.sort(key=lambda item: item[0].score, reverse=True)
