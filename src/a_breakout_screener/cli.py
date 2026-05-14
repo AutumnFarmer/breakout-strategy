@@ -267,7 +267,7 @@ def _parse_int_tuple(value: str) -> tuple[int, ...]:
 
 
 def _parse_signal_types(value: str) -> tuple[str, ...]:
-    allowed = {"A", "B", "C1", "C2", "C", "D"}
+    allowed = {"A", "B"}
     items = tuple(dict.fromkeys(item.strip().upper() for item in value.split(",") if item.strip()))
     invalid = [item for item in items if item not in allowed]
     if invalid:

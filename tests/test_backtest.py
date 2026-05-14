@@ -701,6 +701,76 @@ def test_executable_first_signal_counts_one_lot_too_expensive(monkeypatch, tmp_p
     assert sum(int(row["skipped_one_lot_too_expensive"]) for row in filters) == 1
 
 
+def test_executable_first_signal_skips_untradable_entry_day(monkeypatch, tmp_path) -> None:
+    dates = pd.bdate_range("2026-01-01", periods=5)
+    prepared = _sample_prepared("000001", dates)
+    prepared.history.loc[2, ["amount", "volume"]] = 0
+    config = AppConfig(
+        screener=ScreenerConfig(min_history_rows=1, min_amount=1, min_price=1),
+        paths=SimpleNamespace(cache_dir=tmp_path),
+    )
+
+    def one_signal(prepared, pos, config, resistance=None, **kwargs):
+        if pos != 1:
+            return None
+        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="A")
+
+    monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", one_signal)
+
+    trades, filters = _run_first_signal_executable_backtest(
+        trading_dates=[pd.Timestamp(item) for item in dates],
+        prepared_histories=(prepared,),
+        config=config,
+        lookback_days=30,
+        lot_size=100,
+        max_capital_per_trade=5000,
+        min_capital_per_trade=0,
+        max_buys_per_day=3,
+        max_theme_buys_per_day=2,
+        slippage_bps=0,
+        fee_bps=0,
+        stop_loss_pct=30,
+    )
+
+    assert trades == []
+    assert sum(int(row["skipped_untradable_entry"]) for row in filters) == 1
+
+
+def test_executable_first_signal_skips_limit_up_entry_day(monkeypatch, tmp_path) -> None:
+    dates = pd.bdate_range("2026-01-01", periods=5)
+    prepared = _sample_prepared("000001", dates)
+    prepared.history.loc[2, ["open", "high", "low", "close"]] = 11.6
+    config = AppConfig(
+        screener=ScreenerConfig(min_history_rows=1, min_amount=1, min_price=1),
+        paths=SimpleNamespace(cache_dir=tmp_path),
+    )
+
+    def one_signal(prepared, pos, config, resistance=None, **kwargs):
+        if pos != 1:
+            return None
+        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="A")
+
+    monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", one_signal)
+
+    trades, filters = _run_first_signal_executable_backtest(
+        trading_dates=[pd.Timestamp(item) for item in dates],
+        prepared_histories=(prepared,),
+        config=config,
+        lookback_days=30,
+        lot_size=100,
+        max_capital_per_trade=5000,
+        min_capital_per_trade=0,
+        max_buys_per_day=3,
+        max_theme_buys_per_day=2,
+        slippage_bps=0,
+        fee_bps=0,
+        stop_loss_pct=30,
+    )
+
+    assert trades == []
+    assert sum(int(row["skipped_limit_up_entry"]) for row in filters) == 1
+
+
 def test_executable_first_signal_limits_total_capital(monkeypatch, tmp_path) -> None:
     dates = pd.bdate_range("2026-01-01", periods=5)
     prepared_histories = tuple(_sample_prepared(f"{idx:06d}", dates) for idx in range(1, 4))

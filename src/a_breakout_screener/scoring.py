@@ -193,6 +193,10 @@ def assess_candidate(
         is_week_confirmed=is_week_confirmed,
         params=params,
     )
+    if signal_type == "A" and not _passes_a_trade_structure(close=close, open_=open_, ma10=ma10, ma20=ma20):
+        signal_type = "B"
+        signal_reason = f"{signal_reason}；收盘强度或均线结构不足，降级观察"
+        trade_action = "周线突破但收盘/趋势结构未满足A类买入条件，只观察"
 
     return Candidate(
         code=code,
@@ -558,6 +562,16 @@ def _structure_stop_loss(
         candidates.append(close * (1 - atr_pct * 2))
     valid = [item for item in candidates if item > 0 and item < close]
     return max(valid) if valid else zone_upper * 0.97
+
+
+def _passes_a_trade_structure(close: float, open_: float, ma10: float, ma20: float) -> bool:
+    if close < open_:
+        return False
+    if ma10 > 0 and np.isfinite(ma10) and close < ma10:
+        return False
+    if ma10 > 0 and ma20 > 0 and np.isfinite(ma10) and np.isfinite(ma20) and ma10 < ma20:
+        return False
+    return True
 
 
 def _classify_signal(

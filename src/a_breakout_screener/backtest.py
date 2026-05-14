@@ -55,6 +55,7 @@ class PreparedHistory:
 SIGNAL_SORT_ORDER = {"A": 0, "B": 1, "C1": 2, "C2": 3, "C": 3, "D": 4}
 DEFAULT_EXECUTABLE_BUY_SIGNAL_TYPES = ("A",)
 OBSERVATION_SIGNAL_TYPES = {"B", "C1", "C2", "C"}
+EXECUTABLE_BUY_ALLOWED_SIGNAL_TYPES = {"A", "B"}
 UNKNOWN_TAG = "UNKNOWN"
 
 
@@ -1051,6 +1052,8 @@ def _first_signal_executable_date(
         "skipped_below_min_capital": 0,
         "skipped_total_capital_limit": 0,
         "skipped_invalid_price": 0,
+        "skipped_untradable_entry": 0,
+        "skipped_limit_up_entry": 0,
         "theme_limit_applied": False,
         "capital_used_before": round(current_capital_used, 2),
         "capital_used_after": round(current_capital_used, 2),
@@ -1091,6 +1094,15 @@ def _first_signal_executable_date(
         raw_entry_price = _finite_float(entry_row.get("open"))
         if raw_entry_price <= 0:
             stats["skipped_invalid_price"] += 1
+            continue
+        entry_activity = _finite_float(entry_row.get("amount")) + _finite_float(entry_row.get("volume"))
+        if entry_activity <= 0:
+            stats["skipped_untradable_entry"] += 1
+            continue
+        previous_close = _finite_float(history.iloc[pos].get("close"))
+        entry_low = _finite_float(entry_row.get("low"))
+        if previous_close > 0 and raw_entry_price >= previous_close * 1.095 and entry_low >= raw_entry_price * 0.999:
+            stats["skipped_limit_up_entry"] += 1
             continue
         effective_entry_price = raw_entry_price * (1 + slip)
         exit_pos, exit_reason, raw_exit_price = _long_hold_exit(
@@ -1207,7 +1219,8 @@ def _signal_type_counts(candidates: Any) -> dict[str, int]:
 
 def _normalize_buy_signal_types(signal_types: tuple[str, ...] | list[str] | set[str] | None) -> set[str]:
     normalized = {str(item).strip().upper() for item in (signal_types or ()) if str(item).strip()}
-    return normalized or set(DEFAULT_EXECUTABLE_BUY_SIGNAL_TYPES)
+    allowed = normalized & EXECUTABLE_BUY_ALLOWED_SIGNAL_TYPES
+    return allowed or set(DEFAULT_EXECUTABLE_BUY_SIGNAL_TYPES)
 
 
 def _commission_fee(value: float, fee_rate: float, min_fee: float = 0.0) -> float:
@@ -1773,6 +1786,8 @@ def _summarize_first_signal_executable(
     skipped_theme_limit = sum(int(row.get("skipped_theme_limit", 0)) for row in first_signal_filter_rows)
     skipped_below_min = sum(int(row.get("skipped_below_min_capital", 0)) for row in first_signal_filter_rows)
     skipped_capital_limit = sum(int(row.get("skipped_total_capital_limit", 0)) for row in first_signal_filter_rows)
+    skipped_untradable_entry = sum(int(row.get("skipped_untradable_entry", 0)) for row in first_signal_filter_rows)
+    skipped_limit_up_entry = sum(int(row.get("skipped_limit_up_entry", 0)) for row in first_signal_filter_rows)
     raw_candidates = sum(int(row.get("raw_candidates", 0)) for row in first_signal_filter_rows)
     raw_buyable_candidates = sum(int(row.get("raw_buyable_candidates", 0)) for row in first_signal_filter_rows)
     raw_observation_candidates = sum(int(row.get("raw_observation_candidates", 0)) for row in first_signal_filter_rows)
@@ -1812,6 +1827,8 @@ def _summarize_first_signal_executable(
         "skipped_theme_limit": skipped_theme_limit,
         "skipped_below_min_capital": skipped_below_min,
         "skipped_total_capital_limit": skipped_capital_limit,
+        "skipped_untradable_entry": skipped_untradable_entry,
+        "skipped_limit_up_entry": skipped_limit_up_entry,
         "tag_cache_total": tag_cache_total,
         "tag_cache_covered": tag_cache_covered,
         "tag_cache_coverage_pct": round(tag_cache_covered / tag_cache_total * 100, 2) if tag_cache_total else 0.0,
