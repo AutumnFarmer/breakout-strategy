@@ -903,6 +903,7 @@ def _run_first_signal_executable_backtest(
     tag_cache_total = len(prepared_histories)
     tag_cache_covered = len(tag_map)
     bought_codes: set[str] = set()
+    seen_signal_codes: set[str] = set()
     active_positions: list[tuple[pd.Timestamp, float]] = []
     trades: list[dict[str, Any]] = []
     filter_rows: list[dict[str, Any]] = []
@@ -919,6 +920,7 @@ def _run_first_signal_executable_backtest(
             prepared_histories=prepared_histories,
             config=config,
             bought_codes=bought_codes,
+            seen_signal_codes=seen_signal_codes,
             tag_map=tag_map,
             lot_size=lot_size,
             max_capital_per_trade=max_capital_per_trade,
@@ -950,6 +952,7 @@ def _run_first_signal_executable_backtest(
                 "tag_cache_covered": tag_cache_covered,
                 "tag_cache_coverage_pct": round(tag_cache_covered / tag_cache_total * 100, 2) if tag_cache_total else 0.0,
                 "held_unique_codes": len(bought_codes),
+                "seen_signal_codes": len(seen_signal_codes),
             }
         )
         if idx == 1 or idx % 20 == 0 or idx == total:
@@ -963,6 +966,7 @@ def _first_signal_executable_date(
     prepared_histories: tuple[PreparedHistory, ...],
     config: AppConfig,
     bought_codes: set[str],
+    seen_signal_codes: set[str],
     tag_map: dict[str, tuple[str, ...]],
     lot_size: int,
     max_capital_per_trade: float,
@@ -983,7 +987,7 @@ def _first_signal_executable_date(
     daily_candidates: list[tuple[Candidate, pd.DataFrame, int]] = []
     week_confirmed = _is_backtest_week_confirmed(signal_ts, calendar)
     for prepared in prepared_histories:
-        if prepared.code in bought_codes:
+        if prepared.code in seen_signal_codes:
             continue
         history = prepared.history
         pos = history["date"].searchsorted(signal_ts, side="right") - 1
@@ -1004,6 +1008,8 @@ def _first_signal_executable_date(
             cached_tags = tag_map.get(candidate.code, ())
             if cached_tags and not candidate.tags:
                 candidate = candidate.with_tags(cached_tags)
+            if str(candidate.signal_type or "D").upper() != "D":
+                seen_signal_codes.add(candidate.code)
             daily_candidates.append((candidate, history, pos))
 
     daily_candidates.sort(key=lambda item: _signal_sort_key(item[0]))
@@ -1532,7 +1538,7 @@ def _load_backtest_calendar(config: AppConfig, trading_dates: list[pd.Timestamp]
             .sort_values("cal_date")
             .reset_index(drop=True)
         )
-    return pd.DataFrame({"cal_date": pd.to_datetime(trading_dates), "is_open": True})
+    return pd.DataFrame(columns=["cal_date", "is_open"])
 
 
 def _summarize(
@@ -1796,6 +1802,7 @@ def _summarize_first_signal_executable(
                     **base,
                     "trades": 0,
                     "total_invested": 0.0,
+                    "total_cash_invested": 0.0,
                     "ending_value": 0.0,
                     "total_pnl": 0.0,
                     "total_return_pct": 0.0,
@@ -2184,23 +2191,47 @@ __FIRST_SIGNAL_SUMMARY_CELLS__
     }
     function renderLongHoldTrades(id, rows) {
       const table = document.getElementById(id);
-      table.innerHTML = "<thead><tr><th>信号日</th><th>买入日</th><th class='name'>股票</th><th>排名</th><th>退出</th><th>买入</th><th>卖出</th><th>投入</th><th>市值</th><th>收益</th><th>收益率</th></tr></thead>";
+      const executableRows = rows.some(row => row.shares !== undefined || row.capital_reserved !== undefined || row.buy_fee !== undefined || row.sell_fee !== undefined);
+      table.innerHTML = executableRows
+        ? "<thead><tr><th>信号日</th><th>买入日</th><th class='name'>股票</th><th>信号</th><th>排名</th><th>退出</th><th>买入</th><th>卖出</th><th>股数</th><th>费用</th><th>资金占用</th><th>市值</th><th>收益</th><th>收益率</th></tr></thead>"
+        : "<thead><tr><th>信号日</th><th>买入日</th><th class='name'>股票</th><th>排名</th><th>退出</th><th>买入</th><th>卖出</th><th>投入</th><th>市值</th><th>收益</th><th>收益率</th></tr></thead>";
       const body = document.createElement("tbody");
       rows.forEach(row => {
         const tr = document.createElement("tr");
-        tr.append(
+        const common = [
           cell(row.signal_date),
           cell(row.entry_date),
-          cell(`${row.code} ${row.name}`, "name"),
-          cell(row.rank ?? row.signal_rank),
-          cell(row.exit_reason === "stop_loss" ? "止损" : row.exit_date),
-          cell(fmt(row.entry_price)),
-          cell(fmt(row.exit_price)),
-          cell(fmt(row.invested, 2)),
-          cell(fmt(row.exit_value, 2)),
-          money(row.pnl),
-          signed(row.return_pct)
-        );
+          cell(`${row.code} ${row.name}`, "name")
+        ];
+        if (executableRows) {
+          const fee = Number(row.buy_fee || 0) + Number(row.sell_fee || 0);
+          tr.append(
+            ...common,
+            cell(row.signal_type ?? "-"),
+            cell(row.rank ?? row.signal_rank),
+            cell(row.exit_reason === "stop_loss" ? "止损" : row.exit_date),
+            cell(fmt(row.entry_price)),
+            cell(fmt(row.exit_price)),
+            cell(row.shares ?? "-"),
+            cell(fmt(fee, 2)),
+            cell(fmt(row.capital_reserved ?? row.invested ?? 0, 2)),
+            cell(fmt(row.exit_value, 2)),
+            money(row.pnl),
+            signed(row.return_pct)
+          );
+        } else {
+          tr.append(
+            ...common,
+            cell(row.rank ?? row.signal_rank),
+            cell(row.exit_reason === "stop_loss" ? "止损" : row.exit_date),
+            cell(fmt(row.entry_price)),
+            cell(fmt(row.exit_price)),
+            cell(fmt(row.invested, 2)),
+            cell(fmt(row.exit_value, 2)),
+            money(row.pnl),
+            signed(row.return_pct)
+          );
+        }
         body.appendChild(tr);
       });
       table.appendChild(body);

@@ -65,7 +65,7 @@
 
 ## 实盘化 first-signal 回测
 
-单独命令 `backtest-first-signal-executable` 使用本地历史缓存做首次信号的实盘化近似回测，不会联网拉取行情或交易日历；交易日历优先读本地 `trade_cal` 缓存，缺失时用全市场缓存交易日推导。旧命令 `backtest-first-signal` 保留固定金额研究口径，用于兼容原有输出。
+单独命令 `backtest-first-signal-executable` 使用本地历史缓存做首次信号的实盘化近似回测，不会联网拉取行情或交易日历；交易日历只读本地 `trade_cal` 缓存，缺失时按保守口径处理，只有周五可视为周线确认。旧命令 `backtest-first-signal` 保留固定金额研究口径，用于兼容原有输出。
 
 ```bash
 uv run a-breakout --config config.toml backtest-first-signal-executable \
