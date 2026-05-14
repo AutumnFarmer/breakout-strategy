@@ -34,3 +34,11 @@ def test_backtest_first_signal_executable_help_shows_executable_options(capsys) 
     assert "--min-fee" in output
     assert "--sell-tax-bps" in output
     assert "--buy-signal-types" in output
+
+
+def test_backtest_first_signal_executable_rejects_invalid_signal_type(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["backtest-first-signal-executable", "--buy-signal-types", "AA"])
+
+    assert exc.value.code == 2
+    assert "invalid signal type" in capsys.readouterr().err

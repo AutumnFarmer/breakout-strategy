@@ -84,7 +84,12 @@ def _build_parser() -> argparse.ArgumentParser:
     executable.add_argument("--fee-bps", type=float, default=3.0, help="Buy/sell fee rate in basis points, default: 3")
     executable.add_argument("--min-fee", type=float, default=5.0, help="Minimum commission per side, default: 5")
     executable.add_argument("--sell-tax-bps", type=float, default=5.0, help="Sell-side stamp tax in basis points, default: 5")
-    executable.add_argument("--buy-signal-types", default="A", help="Comma separated signal types eligible for executable buys, default: A")
+    executable.add_argument(
+        "--buy-signal-types",
+        type=_parse_signal_types,
+        default=("A",),
+        help="Comma separated signal types eligible for executable buys, default: A",
+    )
     executable.add_argument("--capital-per-trade", type=float, default=None, help=argparse.SUPPRESS)
     executable.add_argument("--stop-loss-pct", type=float, default=30.0, help="Stop loss percent, default: 30")
     return parser
@@ -190,7 +195,7 @@ def _backtest_first_signal_executable(args: argparse.Namespace, config: AppConfi
         min_fee=max(0.0, args.min_fee),
         sell_tax_bps=max(0.0, args.sell_tax_bps),
         stop_loss_pct=max(0.0, args.stop_loss_pct),
-        buy_signal_types=_parse_signal_types(args.buy_signal_types),
+        buy_signal_types=args.buy_signal_types,
         symbols={item.strip() for item in args.symbols.split(",") if item.strip()} or None,
     )
     print(
@@ -262,7 +267,11 @@ def _parse_int_tuple(value: str) -> tuple[int, ...]:
 
 
 def _parse_signal_types(value: str) -> tuple[str, ...]:
+    allowed = {"A", "B", "C1", "C2", "C", "D"}
     items = tuple(dict.fromkeys(item.strip().upper() for item in value.split(",") if item.strip()))
+    invalid = [item for item in items if item not in allowed]
+    if invalid:
+        raise argparse.ArgumentTypeError(f"invalid signal type(s): {', '.join(invalid)}")
     return items or ("A",)
 
 

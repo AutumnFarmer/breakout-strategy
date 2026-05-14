@@ -103,6 +103,7 @@ def run_backtest(
                 max_top_n=max_top_n,
                 max_holding=max_holding,
                 calendar=calendar,
+                trading_dates=trading_dates,
             )
             trades.extend(day_trades)
             filter_rows.append({"signal_date": signal_ts.date().isoformat(), "total_checked": checked, "passed": passed})
@@ -121,6 +122,7 @@ def run_backtest(
                     max_top_n=max_top_n,
                     max_holding=max_holding,
                     calendar=calendar,
+                    trading_dates=trading_dates,
                 ): idx
                 for idx, signal_ts in enumerate(signal_dates, start=1)
             }
@@ -437,10 +439,11 @@ def _backtest_signal_date(
     max_top_n: int,
     max_holding: int,
     calendar: pd.DataFrame | None = None,
+    trading_dates: list[pd.Timestamp] | None = None,
 ) -> tuple[list[dict[str, Any]], int, int]:
     total_checked = 0
     daily_candidates: list[tuple[Candidate, pd.DataFrame, int]] = []
-    week_confirmed = _is_backtest_week_confirmed(signal_ts, calendar)
+    week_confirmed = _is_backtest_week_confirmed(signal_ts, calendar, trading_dates)
     for prepared in prepared_histories:
         history = prepared.history
         pos = history["date"].searchsorted(signal_ts, side="right") - 1
@@ -527,6 +530,7 @@ def _run_long_hold_backtest(
                 capital_per_trade=capital_per_trade,
                 stop_loss_pct=stop_loss_pct,
                 calendar=calendar,
+                trading_dates=trading_dates,
             )
             trades.extend(day_trades)
             filter_rows.append({"signal_date": signal_ts.date().isoformat(), "total_checked": checked, "passed": passed})
@@ -546,6 +550,7 @@ def _run_long_hold_backtest(
                     capital_per_trade=capital_per_trade,
                     stop_loss_pct=stop_loss_pct,
                     calendar=calendar,
+                    trading_dates=trading_dates,
                 ): idx
                 for idx, signal_ts in enumerate(signal_dates, start=1)
             }
@@ -568,10 +573,11 @@ def _long_hold_signal_date(
     capital_per_trade: float,
     stop_loss_pct: float,
     calendar: pd.DataFrame | None = None,
+    trading_dates: list[pd.Timestamp] | None = None,
 ) -> tuple[list[dict[str, Any]], int, int]:
     total_checked = 0
     daily_candidates: list[tuple[Candidate, pd.DataFrame, int]] = []
-    week_confirmed = _is_backtest_week_confirmed(signal_ts, calendar)
+    week_confirmed = _is_backtest_week_confirmed(signal_ts, calendar, trading_dates)
     for prepared in prepared_histories:
         history = prepared.history
         pos = history["date"].searchsorted(signal_ts, side="right") - 1
@@ -661,6 +667,7 @@ def _run_first_signal_backtest(
                 capital_per_trade=capital_per_trade,
                 stop_loss_fraction=stop_loss_fraction,
                 calendar=calendar,
+                trading_dates=trading_dates,
             )
             if trade:
                 trades.append(trade)
@@ -678,6 +685,7 @@ def _run_first_signal_backtest(
                     capital_per_trade=capital_per_trade,
                     stop_loss_fraction=stop_loss_fraction,
                     calendar=calendar,
+                    trading_dates=trading_dates,
                 ): prepared.code
                 for prepared in prepared_histories
             }
@@ -719,6 +727,7 @@ def _first_signal_for_stock(
     capital_per_trade: float,
     stop_loss_fraction: float,
     calendar: pd.DataFrame | None = None,
+    trading_dates: list[pd.Timestamp] | None = None,
 ) -> dict[str, Any] | None:
     history = prepared.history
     start_pos = int(history["date"].searchsorted(start_ts, side="left"))
@@ -746,7 +755,7 @@ def _first_signal_for_stock(
         breakout_pct = close / resistance.resistance - 1
         if breakout_pct < config.screener.breakout_buffer or breakout_pct > config.screener.max_extension:
             continue
-        week_confirmed = _is_backtest_week_confirmed(latest_ts, calendar)
+        week_confirmed = _is_backtest_week_confirmed(latest_ts, calendar, trading_dates)
         candidate = _evaluate_prepared_at_pos(
             prepared,
             pos,
@@ -903,7 +912,7 @@ def _run_first_signal_executable_backtest(
     tag_cache_total = len(prepared_histories)
     tag_cache_covered = len(tag_map)
     bought_codes: set[str] = set()
-    seen_signal_codes: set[str] = set()
+    seen_buy_signal_codes: set[str] = set()
     active_positions: list[tuple[pd.Timestamp, float]] = []
     trades: list[dict[str, Any]] = []
     filter_rows: list[dict[str, Any]] = []
@@ -920,7 +929,7 @@ def _run_first_signal_executable_backtest(
             prepared_histories=prepared_histories,
             config=config,
             bought_codes=bought_codes,
-            seen_signal_codes=seen_signal_codes,
+            seen_buy_signal_codes=seen_buy_signal_codes,
             tag_map=tag_map,
             lot_size=lot_size,
             max_capital_per_trade=max_capital_per_trade,
@@ -935,6 +944,7 @@ def _run_first_signal_executable_backtest(
             sell_tax_bps=sell_tax_bps,
             stop_loss_fraction=stop_loss_fraction,
             buy_signal_types=buy_signal_types,
+            trading_dates=trading_dates,
         )
         trades.extend(day_trades)
         for trade in day_trades:
@@ -952,7 +962,7 @@ def _run_first_signal_executable_backtest(
                 "tag_cache_covered": tag_cache_covered,
                 "tag_cache_coverage_pct": round(tag_cache_covered / tag_cache_total * 100, 2) if tag_cache_total else 0.0,
                 "held_unique_codes": len(bought_codes),
-                "seen_signal_codes": len(seen_signal_codes),
+                "seen_buy_signal_codes": len(seen_buy_signal_codes),
             }
         )
         if idx == 1 or idx % 20 == 0 or idx == total:
@@ -966,7 +976,7 @@ def _first_signal_executable_date(
     prepared_histories: tuple[PreparedHistory, ...],
     config: AppConfig,
     bought_codes: set[str],
-    seen_signal_codes: set[str],
+    seen_buy_signal_codes: set[str],
     tag_map: dict[str, tuple[str, ...]],
     lot_size: int,
     max_capital_per_trade: float,
@@ -979,15 +989,17 @@ def _first_signal_executable_date(
     sell_tax_bps: float,
     stop_loss_fraction: float,
     buy_signal_types: tuple[str, ...],
+    trading_dates: list[pd.Timestamp] | None = None,
     max_total_capital: float = 0.0,
     current_capital_used: float = 0.0,
     calendar: pd.DataFrame | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     total_checked = 0
     daily_candidates: list[tuple[Candidate, pd.DataFrame, int]] = []
-    week_confirmed = _is_backtest_week_confirmed(signal_ts, calendar)
+    buy_signal_set = _normalize_buy_signal_types(buy_signal_types)
+    week_confirmed = _is_backtest_week_confirmed(signal_ts, calendar, trading_dates)
     for prepared in prepared_histories:
-        if prepared.code in seen_signal_codes:
+        if prepared.code in seen_buy_signal_codes:
             continue
         history = prepared.history
         pos = history["date"].searchsorted(signal_ts, side="right") - 1
@@ -1008,15 +1020,12 @@ def _first_signal_executable_date(
             cached_tags = tag_map.get(candidate.code, ())
             if cached_tags and not candidate.tags:
                 candidate = candidate.with_tags(cached_tags)
-            if str(candidate.signal_type or "D").upper() != "D":
-                seen_signal_codes.add(candidate.code)
+            if str(candidate.signal_type or "D").upper() in buy_signal_set:
+                seen_buy_signal_codes.add(candidate.code)
             daily_candidates.append((candidate, history, pos))
 
     daily_candidates.sort(key=lambda item: _signal_sort_key(item[0]))
     signal_type_counts = _signal_type_counts(candidate for candidate, _, _ in daily_candidates)
-    buy_signal_set = {item.strip().upper() for item in buy_signal_types if item.strip()}
-    if not buy_signal_set:
-        buy_signal_set = set(DEFAULT_EXECUTABLE_BUY_SIGNAL_TYPES)
     reportable_candidates = [
         candidate for candidate, _, _ in daily_candidates
         if str(candidate.signal_type or "D").upper() != "D"
@@ -1196,6 +1205,11 @@ def _signal_type_counts(candidates: Any) -> dict[str, int]:
     return counts
 
 
+def _normalize_buy_signal_types(signal_types: tuple[str, ...] | list[str] | set[str] | None) -> set[str]:
+    normalized = {str(item).strip().upper() for item in (signal_types or ()) if str(item).strip()}
+    return normalized or set(DEFAULT_EXECUTABLE_BUY_SIGNAL_TYPES)
+
+
 def _commission_fee(value: float, fee_rate: float, min_fee: float = 0.0) -> float:
     if value <= 0:
         return 0.0
@@ -1355,8 +1369,19 @@ def _calc_configured_resistance(weekly: pd.DataFrame, latest_trade_ts: pd.Timest
     )
 
 
-def _is_backtest_week_confirmed(trade_ts: pd.Timestamp, calendar: pd.DataFrame | None = None) -> bool:
-    trade_date = pd.Timestamp(trade_ts).date()
+def _is_backtest_week_confirmed(
+    trade_ts: pd.Timestamp,
+    calendar: pd.DataFrame | None = None,
+    trading_dates: list[pd.Timestamp] | None = None,
+) -> bool:
+    ts = pd.Timestamp(trade_ts).normalize()
+    if trading_dates:
+        week = ts.to_period("W-FRI")
+        for item in trading_dates:
+            other = pd.Timestamp(item).normalize()
+            if other > ts and other.to_period("W-FRI") == week:
+                return False
+    trade_date = ts.date()
     return is_last_trade_day_of_week(trade_date, calendar if calendar is not None else pd.DataFrame())
 
 
@@ -1760,7 +1785,7 @@ def _summarize_first_signal_executable(
         "start_date": start_date,
         "end_date": end_date,
         "execution_mode": "executable_first_signal",
-        "duplicate_policy": "same_code_buy_once_after_execution",
+        "duplicate_policy": "buy_signal_once; observation_signals_do_not_consume",
         "buy_signal_types": "/".join(sorted({item.strip().upper() for item in buy_signal_types if item.strip()})),
         "capital_per_trade": round(max_capital_per_trade, 2),
         "max_buys_per_day": int(max_buys_per_day),
