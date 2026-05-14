@@ -22,6 +22,7 @@ ISSUE_NUMBER=""
 ISSUE_TITLE=""
 BRANCH=""
 LOG_FILE=""
+BASE_COMMIT=""
 RUN_ID="$(date -u +%Y%m%d%H%M%S)"
 HANDLED_EXIT=0
 
@@ -69,6 +70,10 @@ git_is_clean() {
   [[ -z "$(git status --porcelain --untracked-files=normal)" ]]
 }
 
+has_new_commits() {
+  [[ -n "${BASE_COMMIT:-}" && "$(git rev-parse HEAD)" != "$BASE_COMMIT" ]]
+}
+
 stage_allowed_changes() {
   git add -A -- . \
     ":(exclude).env" \
@@ -109,6 +114,9 @@ set_issue_label_state() {
 
 save_failure_branch_if_needed() {
   if git_is_clean; then
+    if has_new_commits; then
+      git push origin "$BRANCH" >/dev/null || true
+    fi
     return 0
   fi
 
@@ -181,7 +189,7 @@ build_prompt() {
 1. 只修改与任务相关的文件。
 2. 不要提交 .env、密钥、缓存、输出报告、历史行情数据。
 3. 修改后运行测试；如果测试失败，继续修复，直到测试通过或明确说明失败原因。
-4. 提交信息要简洁，说明本次修改点。
+4. 不要主动执行 git commit；runner 会统一提交和推送。若你已经提交，runner 也会识别并处理。
 5. 最终回复必须包含修改摘要、测试结果、风险或遗留问题。
 
 任务说明：
@@ -243,6 +251,7 @@ main() {
   git checkout "$BASE_BRANCH"
   git pull --ff-only origin "$BASE_BRANCH"
   git checkout -b "$BRANCH"
+  BASE_COMMIT="$(git rev-parse HEAD)"
 
   local prompt_file
   prompt_file="$(mktemp)"
@@ -260,7 +269,7 @@ main() {
     exit "$codex_status"
   fi
 
-  if git_is_clean; then
+  if git_is_clean && ! has_new_commits; then
     comment_issue "Codex runner 已处理 Issue #${ISSUE_NUMBER}，但未产生代码变更。"
     set_issue_label_state "$NOCHANGE_LABEL"
     HANDLED_EXIT=1
@@ -280,14 +289,15 @@ main() {
 
   stage_allowed_changes
 
-  if git diff --cached --quiet; then
+  if ! git diff --cached --quiet; then
+    git commit -m "Implement issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
+  elif ! has_new_commits; then
     comment_issue "Codex runner 已处理 Issue #${ISSUE_NUMBER}，但没有可提交的代码变更。"
     set_issue_label_state "$NOCHANGE_LABEL"
     HANDLED_EXIT=1
     exit 0
   fi
 
-  git commit -m "Implement issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
   git push origin "$BRANCH"
 
   local pr_body
