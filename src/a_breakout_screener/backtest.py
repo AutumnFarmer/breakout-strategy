@@ -353,12 +353,12 @@ def run_first_signal_executable_backtest(
         end_date=end_ts.date().isoformat(),
     )
 
-    output_dir = config.paths.output_dir / "backtest" / date.today().isoformat()
+    output_dir = config.paths.output_dir / "backtest" / date.today().isoformat() / "first_signal_executable"
     output_dir.mkdir(parents=True, exist_ok=True)
-    trades_path = output_dir / "first_signal_trades.csv"
-    summary_path = output_dir / "first_signal_summary.csv"
-    filters_path = output_dir / "first_signal_filters.csv"
-    html_path = output_dir / "backtest_report.html"
+    trades_path = output_dir / "first_signal_executable_trades.csv"
+    summary_path = output_dir / "first_signal_executable_summary.csv"
+    filters_path = output_dir / "first_signal_executable_filters.csv"
+    html_path = output_dir / "first_signal_executable_report.html"
     trades_df.to_csv(trades_path, index=False, encoding="utf-8-sig")
     summary_df.to_csv(summary_path, index=False, encoding="utf-8-sig")
     pd.DataFrame(filter_rows).to_csv(filters_path, index=False, encoding="utf-8-sig")
@@ -372,6 +372,7 @@ def run_first_signal_executable_backtest(
             long_hold_trades_df=pd.DataFrame(),
             first_signal_summary_df=summary_df,
             first_signal_trades_df=trades_df,
+            report_mode="first_signal_executable",
         ),
         encoding="utf-8",
     )
@@ -1611,6 +1612,7 @@ def _render_html(
     long_hold_trades_df: pd.DataFrame,
     first_signal_summary_df: pd.DataFrame,
     first_signal_trades_df: pd.DataFrame,
+    report_mode: str = "research",
 ) -> str:
     summary_rows = summary.to_dict(orient="records")
     top_trades = trades.sort_values("return_pct", ascending=False).head(20).to_dict(orient="records") if not trades.empty else []
@@ -1632,6 +1634,7 @@ def _render_html(
         "firstSignalTopTrades": first_signal_top,
         "firstSignalWorstTrades": first_signal_worst,
         "meta": {
+            "reportMode": report_mode,
             "signalDays": signal_days,
             "stockCount": stock_count,
             "tradeCount": int(len(trades)),
@@ -1639,7 +1642,69 @@ def _render_html(
             "firstSignalTradeCount": int(len(first_signal_trades_df)),
         },
     }
-    return HTML_TEMPLATE.replace("__BACKTEST_DATA__", json.dumps(payload, ensure_ascii=False))
+    return (
+        HTML_TEMPLATE.replace("__BACKTEST_DATA__", json.dumps(payload, ensure_ascii=False))
+        .replace("__REPORT_TITLE__", _html_report_title(report_mode))
+        .replace("__FIRST_SIGNAL_NOTE__", _html_first_signal_note(report_mode))
+        .replace("__FIRST_SIGNAL_SUMMARY_HEADER__", _html_first_signal_summary_header(report_mode))
+        .replace("__FIRST_SIGNAL_SUMMARY_CELLS__", _html_first_signal_summary_cells(report_mode))
+    )
+
+
+def _html_report_title(report_mode: str) -> str:
+    if report_mode == "first_signal_executable":
+        return "A股突破策略 first-signal executable backtest"
+    return "A股突破策略回测"
+
+
+def _html_first_signal_note(report_mode: str) -> str:
+    if report_mode == "first_signal_executable":
+        return "口径：first-signal executable backtest，按交易日回放 A/B/C1 首次信号，下一交易日开盘按整手买入；限制每日限流和题材限额，计入滑点、费率和峰值资金占用，持有到最新交易日或触发设定止损。"
+    return "口径：从一年前开始逐个交易日回放策略信号，A/B/C 类首次出现则下一交易日开盘按固定金额研究口径买入；同一股票后续重复信号不重复买入，持有到最新交易日或触发设定止损。该口径用于信号收益研究，不代表实盘成交。"
+
+
+def _html_first_signal_summary_header(report_mode: str) -> str:
+    if report_mode == "first_signal_executable":
+        return "<thead><tr><th>区间</th><th>单票上限</th><th>一手</th><th>每日限流</th><th>题材限额</th><th>滑点bps</th><th>费率bps</th><th>止损</th><th>信号日</th><th>有候选日</th><th>首次候选</th><th>买入数</th><th>总投入</th><th>期末/止损后市值</th><th>总收益</th><th>总收益率</th><th>胜率</th><th>止损数</th><th>止损率</th><th>峰值资金占用</th></tr></thead>"
+    return "<thead><tr><th>区间</th><th>单只买入</th><th>止损</th><th>信号日</th><th>有候选日</th><th>首次候选</th><th>买入数</th><th>总投入</th><th>期末/止损后市值</th><th>总收益</th><th>总收益率</th><th>胜率</th><th>止损数</th><th>止损率</th></tr></thead>"
+
+
+def _html_first_signal_summary_cells(report_mode: str) -> str:
+    if report_mode == "first_signal_executable":
+        return """          cell(`${row.start_date} ~ ${row.end_date}`),
+          cell(fmt(row.max_capital_per_trade ?? row.capital_per_trade, 0)),
+          cell(row.lot_size ?? "-"),
+          cell(row.max_buys_per_day ?? "-"),
+          cell(row.max_theme_buys_per_day ?? "-"),
+          cell(fmt(row.slippage_bps ?? 0, 1)),
+          cell(fmt(row.fee_bps ?? 0, 1)),
+          cell(`${fmt(row.stop_loss_pct)}%`),
+          cell(row.signal_days),
+          cell(row.days_with_candidates),
+          cell(row.raw_first_signal_candidates),
+          cell(row.trades),
+          cell(fmt(row.total_invested, 2)),
+          cell(fmt(row.ending_value, 2)),
+          money(row.total_pnl),
+          signed(row.total_return_pct),
+          cell(`${fmt(row.win_rate_pct)}%`),
+          cell(row.stopped_trades),
+          cell(`${fmt(row.stop_loss_rate_pct)}%`),
+          cell(fmt(row.peak_capital_used ?? 0, 2))"""
+    return """          cell(`${row.start_date} ~ ${row.end_date}`),
+          cell(fmt(row.capital_per_trade, 0)),
+          cell(`${fmt(row.stop_loss_pct)}%`),
+          cell(row.signal_days),
+          cell(row.days_with_candidates),
+          cell(row.raw_first_signal_candidates),
+          cell(row.trades),
+          cell(fmt(row.total_invested, 2)),
+          cell(fmt(row.ending_value, 2)),
+          money(row.total_pnl),
+          signed(row.total_return_pct),
+          cell(`${fmt(row.win_rate_pct)}%`),
+          cell(row.stopped_trades),
+          cell(`${fmt(row.stop_loss_rate_pct)}%`)"""
 
 
 HTML_TEMPLATE = """<!doctype html>
@@ -1647,7 +1712,7 @@ HTML_TEMPLATE = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>A股突破策略回测</title>
+  <title>__REPORT_TITLE__</title>
   <style>
     body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f7f9; color: #18202b; }
     header { padding: 24px 28px 14px; background: #fff; border-bottom: 1px solid #d9dee8; }
@@ -1673,7 +1738,7 @@ HTML_TEMPLATE = """<!doctype html>
 </head>
 <body>
   <header>
-    <h1>A股突破策略回测</h1>
+    <h1>__REPORT_TITLE__</h1>
     <div class="stats">
       <div class="stat"><span>信号日</span><strong id="signalDays"></strong></div>
       <div class="stat"><span>股票数</span><strong id="stockCount"></strong></div>
@@ -1685,7 +1750,7 @@ HTML_TEMPLATE = """<!doctype html>
   <main>
     <section>
       <h2>首次信号买入</h2>
-      <div class="note">口径：从一年前开始逐个交易日回放策略信号，A/B/C1 类按信号、得分和量能排序，下一交易日开盘按整手和单票资金上限买入；限制每日新增买入和同主标签买入数，计入滑点、手续费，持有到最新交易日或触发设定止损。</div>
+      <div class="note">__FIRST_SIGNAL_NOTE__</div>
       <div class="wrap"><table id="firstSignalSummaryTable"></table></div>
     </section>
     <section>
@@ -1791,31 +1856,12 @@ HTML_TEMPLATE = """<!doctype html>
     }
     function renderFirstSignalSummary(rows) {
       const table = document.getElementById("firstSignalSummaryTable");
-      table.innerHTML = "<thead><tr><th>区间</th><th>单票上限</th><th>一手</th><th>每日上限</th><th>题材上限</th><th>滑点bps</th><th>费率bps</th><th>止损</th><th>信号日</th><th>有候选日</th><th>首次候选</th><th>买入数</th><th>总投入</th><th>期末/止损后市值</th><th>总收益</th><th>总收益率</th><th>胜率</th><th>止损数</th><th>止损率</th><th>峰值占用</th></tr></thead>";
+      table.innerHTML = "__FIRST_SIGNAL_SUMMARY_HEADER__";
       const body = document.createElement("tbody");
       rows.forEach(row => {
         const tr = document.createElement("tr");
         tr.append(
-          cell(`${row.start_date} ~ ${row.end_date}`),
-          cell(fmt(row.max_capital_per_trade ?? row.capital_per_trade, 0)),
-          cell(row.lot_size ?? "-"),
-          cell(row.max_buys_per_day ?? "-"),
-          cell(row.max_theme_buys_per_day ?? "-"),
-          cell(fmt(row.slippage_bps ?? 0, 1)),
-          cell(fmt(row.fee_bps ?? 0, 1)),
-          cell(`${fmt(row.stop_loss_pct)}%`),
-          cell(row.signal_days),
-          cell(row.days_with_candidates),
-          cell(row.raw_first_signal_candidates),
-          cell(row.trades),
-          cell(fmt(row.total_invested, 2)),
-          cell(fmt(row.ending_value, 2)),
-          money(row.total_pnl),
-          signed(row.total_return_pct),
-          cell(`${fmt(row.win_rate_pct)}%`),
-          cell(row.stopped_trades),
-          cell(`${fmt(row.stop_loss_rate_pct)}%`),
-          cell(fmt(row.peak_capital_used ?? 0, 2))
+__FIRST_SIGNAL_SUMMARY_CELLS__
         );
         body.appendChild(tr);
       });

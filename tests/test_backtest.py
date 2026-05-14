@@ -9,11 +9,14 @@ from a_breakout_screener.backtest import (
     _backtest_signal_date,
     _long_hold_exit,
     _prepare_history,
+    _render_html,
     _run_first_signal_backtest,
     _run_first_signal_executable_backtest,
     _summarize_first_signal_executable,
     _summarize_long_hold,
     calc_lot_position,
+    run_first_signal_backtest,
+    run_first_signal_executable_backtest,
 )
 from a_breakout_screener.config import AppConfig, ScreenerConfig
 from a_breakout_screener.models import Candidate
@@ -351,6 +354,152 @@ def test_executable_first_signal_counts_one_lot_too_expensive(monkeypatch, tmp_p
 
     assert trades == []
     assert sum(int(row["skipped_one_lot_too_expensive"]) for row in filters) == 1
+
+
+def test_research_first_signal_public_output_keeps_legacy_files(monkeypatch, tmp_path) -> None:
+    dates = pd.bdate_range("2026-01-01", periods=5)
+    history = _sample_history(dates)
+    config = AppConfig(
+        screener=ScreenerConfig(min_history_rows=1, min_amount=1, min_price=1),
+        paths=SimpleNamespace(cache_dir=tmp_path / "cache", output_dir=tmp_path / "outputs"),
+    )
+
+    monkeypatch.setattr("a_breakout_screener.backtest._load_histories", lambda cache_dir, symbols=None: {"000001": history})
+    monkeypatch.setattr("a_breakout_screener.backtest._load_names_from_latest_daily", lambda cache_dir: {"000001": "平安银行"})
+    monkeypatch.setattr(
+        "a_breakout_screener.backtest._run_first_signal_backtest",
+        lambda **kwargs: ([], [{"signal_date": "2026-01-02", "passed": 0, "new_buys": 0}]),
+    )
+
+    result = run_first_signal_backtest(config, lookback_days=30)
+
+    assert result.output_dir.name != "first_signal_executable"
+    assert result.trades_path.name == "first_signal_trades.csv"
+    assert result.summary_path.name == "first_signal_summary.csv"
+    assert result.filters_path.name == "first_signal_filters.csv"
+    assert result.html_path.name == "backtest_report.html"
+    assert result.trades_path.exists()
+    assert result.summary_path.exists()
+    assert result.filters_path.exists()
+    assert result.html_path.exists()
+    assert not (result.output_dir / "first_signal_executable_trades.csv").exists()
+
+
+def test_executable_first_signal_public_output_uses_isolated_files(monkeypatch, tmp_path) -> None:
+    dates = pd.bdate_range("2026-01-01", periods=5)
+    history = _sample_history(dates)
+    config = AppConfig(
+        screener=ScreenerConfig(min_history_rows=1, min_amount=1, min_price=1),
+        paths=SimpleNamespace(cache_dir=tmp_path / "cache", output_dir=tmp_path / "outputs"),
+    )
+
+    monkeypatch.setattr("a_breakout_screener.backtest._load_histories", lambda cache_dir, symbols=None: {"000001": history})
+    monkeypatch.setattr("a_breakout_screener.backtest._load_names_from_latest_daily", lambda cache_dir: {"000001": "平安银行"})
+    monkeypatch.setattr(
+        "a_breakout_screener.backtest._run_first_signal_executable_backtest",
+        lambda **kwargs: ([], [{"signal_date": "2026-01-02", "passed": 0, "raw_candidates": 0}]),
+    )
+
+    result = run_first_signal_executable_backtest(config, lookback_days=30)
+
+    assert result.output_dir.name == "first_signal_executable"
+    assert result.trades_path.name == "first_signal_executable_trades.csv"
+    assert result.summary_path.name == "first_signal_executable_summary.csv"
+    assert result.filters_path.name == "first_signal_executable_filters.csv"
+    assert result.html_path.name == "first_signal_executable_report.html"
+    assert result.trades_path.exists()
+    assert result.summary_path.exists()
+    assert result.filters_path.exists()
+    assert result.html_path.exists()
+    assert not (result.output_dir.parent / "first_signal_trades.csv").exists()
+    assert not (result.output_dir.parent / "first_signal_summary.csv").exists()
+    assert not (result.output_dir.parent / "first_signal_filters.csv").exists()
+    assert not (result.output_dir.parent / "backtest_report.html").exists()
+
+
+def test_research_html_uses_research_first_signal_wording() -> None:
+    html = _render_html(
+        pd.DataFrame(),
+        pd.DataFrame(),
+        signal_days=1,
+        stock_count=1,
+        long_hold_summary_df=pd.DataFrame(),
+        long_hold_trades_df=pd.DataFrame(),
+        first_signal_summary_df=pd.DataFrame(),
+        first_signal_trades_df=pd.DataFrame(),
+    )
+
+    assert "固定金额研究口径" in html
+    assert "单只买入" in html
+    assert "first-signal executable backtest" not in html
+    assert "整手买入" not in html
+    assert "每日限流" not in html
+    assert "峰值资金占用" not in html
+
+
+def test_executable_html_uses_executable_first_signal_wording() -> None:
+    summary = pd.DataFrame(
+        [
+            {
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-07",
+                "capital_per_trade": 5000.0,
+                "max_capital_per_trade": 5000.0,
+                "lot_size": 100,
+                "max_buys_per_day": 3,
+                "max_theme_buys_per_day": 2,
+                "slippage_bps": 10.0,
+                "fee_bps": 3.0,
+                "stop_loss_pct": 30.0,
+                "signal_days": 1,
+                "days_with_candidates": 1,
+                "raw_first_signal_candidates": 1,
+                "trades": 1,
+                "total_invested": 1000.0,
+                "ending_value": 1100.0,
+                "total_pnl": 100.0,
+                "total_return_pct": 10.0,
+                "win_rate_pct": 100.0,
+                "stopped_trades": 0,
+                "stop_loss_rate_pct": 0.0,
+                "peak_capital_used": 1000.0,
+            }
+        ]
+    )
+
+    html = _render_html(
+        pd.DataFrame(),
+        pd.DataFrame(),
+        signal_days=1,
+        stock_count=1,
+        long_hold_summary_df=pd.DataFrame(),
+        long_hold_trades_df=pd.DataFrame(),
+        first_signal_summary_df=summary,
+        first_signal_trades_df=pd.DataFrame(),
+        report_mode="first_signal_executable",
+    )
+
+    assert "first-signal executable backtest" in html
+    assert "整手买入" in html
+    assert "每日限流" in html
+    assert "峰值资金占用" in html
+    assert "max_buys_per_day" in html
+    assert "lot_size" in html
+    assert "peak_capital_used" in html
+
+
+def _sample_history(dates: pd.DatetimeIndex) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "date": dates,
+            "open": [10.0, 10.0, 10.0, 11.0, 11.5],
+            "high": [11.0, 11.0, 11.0, 12.5, 12.5],
+            "low": [9.5, 9.5, 9.5, 10.5, 11.0],
+            "close": [10.0, 10.5, 11.0, 11.5, 12.0],
+            "volume": [1_000_000] * len(dates),
+            "amount": [100_000_000] * len(dates),
+        }
+    )
 
 
 def _sample_prepared(
