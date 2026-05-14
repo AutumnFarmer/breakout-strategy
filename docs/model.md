@@ -79,7 +79,7 @@ uv run a-breakout --config config.toml backtest-first-signal-executable \
   --fee-bps 3
 ```
 
-该模式按交易日回放 A/B/C1 首次信号，下一交易日开盘按 `lot_size` 整手买入；如果一手成本超过 `max_capital_per_trade` 则跳过。设置 `max_total_capital` 后会按持仓占用约束总资金，默认 0 表示只统计峰值占用、不限制总资金。同一天最多新增 `max_buys_per_day` 只，同一主标签最多新增 `max_theme_buys_per_day` 只；主标签来自本地 `stock_tags` 缓存，缺失时不阻塞回测，汇总里会标明题材标签缓存覆盖率和候选覆盖率。
+该模式按交易日回放 A/B 首次信号并买入，C1 强趋势信号只统计为未买入观察信号；下一交易日开盘按 `lot_size` 整手买入。如果一手成本超过 `max_capital_per_trade` 则跳过。设置 `max_total_capital` 后会按持仓占用约束总资金，默认 0 表示只统计峰值占用、不限制总资金。同一天最多新增 `max_buys_per_day` 只，同一主标签最多新增 `max_theme_buys_per_day` 只；主标签来自本地 `stock_tags` 缓存，缺失时会进入 `UNKNOWN` 主题桶参与限额，汇总里会标明题材标签缓存覆盖率和候选覆盖率。
 
 输出目录为 `outputs/backtest/<date>/first_signal_executable/`。`first_signal_executable_trades.csv` 会同时保留原始开盘/卖出价、滑点后的有效成交价、整手数、实际投入、买卖费用、资金占用和 PnL；`first_signal_executable_summary.csv` 汇总总投入、含买入费的现金投入、总收益、胜率、止损率、最大持仓数、峰值资金占用、总资金约束跳过数量和一手过贵跳过数量。手续费暂按 `fee_bps` 比例费率计算，未加入最低 5 元费用假设。
 

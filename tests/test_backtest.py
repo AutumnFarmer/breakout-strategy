@@ -9,6 +9,7 @@ from a_breakout_screener.backtest import (
     _backtest_signal_date,
     _is_backtest_week_confirmed,
     _long_hold_exit,
+    _previous_week_already_broke_out,
     _prepare_history,
     _render_html,
     _run_first_signal_backtest,
@@ -62,12 +63,35 @@ def test_prepare_history_prefers_amount_for_activity_ratio() -> None:
 
 
 def test_backtest_week_confirmation_uses_common_trading_dates() -> None:
-    week_dates = [pd.Timestamp("2026-05-11"), pd.Timestamp("2026-05-13"), pd.Timestamp("2026-05-15")]
-    short_week_dates = [pd.Timestamp("2026-05-04"), pd.Timestamp("2026-05-07")]
+    week_calendar = pd.DataFrame(
+        {
+            "cal_date": pd.to_datetime(["2026-05-11", "2026-05-13", "2026-05-15"]),
+            "is_open": [True, True, True],
+        }
+    )
+    short_week_calendar = pd.DataFrame(
+        {
+            "cal_date": pd.to_datetime(["2026-05-04", "2026-05-07"]),
+            "is_open": [True, True],
+        }
+    )
 
-    assert not _is_backtest_week_confirmed(pd.Timestamp("2026-05-13"), week_dates)
-    assert _is_backtest_week_confirmed(pd.Timestamp("2026-05-15"), week_dates)
-    assert _is_backtest_week_confirmed(pd.Timestamp("2026-05-07"), short_week_dates)
+    assert not _is_backtest_week_confirmed(pd.Timestamp("2026-05-13"), week_calendar)
+    assert _is_backtest_week_confirmed(pd.Timestamp("2026-05-15"), week_calendar)
+    assert _is_backtest_week_confirmed(pd.Timestamp("2026-05-07"), short_week_calendar)
+    assert not _is_backtest_week_confirmed(pd.Timestamp("2026-05-07"), pd.DataFrame())
+
+
+def test_previous_week_breakout_blocks_repeated_a_confirmation() -> None:
+    weekly = pd.DataFrame(
+        {
+            "week_end": pd.to_datetime(["2026-04-24", "2026-05-01"]),
+            "close": [9.8, 10.3],
+        }
+    )
+
+    assert _previous_week_already_broke_out(weekly, pd.Timestamp("2026-05-07"), 10.0, 0.02)
+    assert not _previous_week_already_broke_out(weekly, pd.Timestamp("2026-05-01"), 10.0, 0.02)
 
 
 def test_backtest_skips_stock_missing_signal_date() -> None:
@@ -297,6 +321,75 @@ def test_executable_first_signal_limits_theme_buys(monkeypatch, tmp_path) -> Non
     assert any(bool(row["theme_limit_applied"]) for row in filters)
 
 
+def test_executable_first_signal_limits_unknown_theme_bucket(monkeypatch, tmp_path) -> None:
+    dates = pd.bdate_range("2026-01-01", periods=5)
+    prepared_histories = tuple(_sample_prepared(f"{idx:06d}", dates) for idx in range(1, 4))
+    config = AppConfig(
+        screener=ScreenerConfig(min_history_rows=1, min_amount=1, min_price=1),
+        paths=SimpleNamespace(cache_dir=tmp_path),
+    )
+
+    def untagged_signal(prepared, pos, config, resistance=None, **kwargs):
+        if pos != 1:
+            return None
+        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="B")
+
+    monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", untagged_signal)
+
+    trades, filters = _run_first_signal_executable_backtest(
+        trading_dates=[pd.Timestamp(item) for item in dates],
+        prepared_histories=prepared_histories,
+        config=config,
+        lookback_days=30,
+        lot_size=100,
+        max_capital_per_trade=1000,
+        min_capital_per_trade=0,
+        max_buys_per_day=10,
+        max_theme_buys_per_day=1,
+        slippage_bps=0,
+        fee_bps=0,
+        stop_loss_pct=30,
+    )
+
+    assert len(trades) == 1
+    assert trades[0]["primary_tag"] == "UNKNOWN"
+    assert sum(int(row["skipped_theme_limit"]) for row in filters) == 2
+
+
+def test_executable_first_signal_does_not_buy_c1_by_default(monkeypatch, tmp_path) -> None:
+    dates = pd.bdate_range("2026-01-01", periods=5)
+    prepared = _sample_prepared("000001", dates)
+    config = AppConfig(
+        screener=ScreenerConfig(min_history_rows=1, min_amount=1, min_price=1),
+        paths=SimpleNamespace(cache_dir=tmp_path),
+    )
+
+    def c1_signal(prepared, pos, config, resistance=None, **kwargs):
+        if pos != 1:
+            return None
+        return _candidate(prepared.code, prepared.name, score=90.0, signal_type="C1")
+
+    monkeypatch.setattr("a_breakout_screener.backtest._evaluate_prepared_at_pos", c1_signal)
+
+    trades, filters = _run_first_signal_executable_backtest(
+        trading_dates=[pd.Timestamp(item) for item in dates],
+        prepared_histories=(prepared,),
+        config=config,
+        lookback_days=30,
+        lot_size=100,
+        max_capital_per_trade=1000,
+        min_capital_per_trade=0,
+        max_buys_per_day=10,
+        max_theme_buys_per_day=1,
+        slippage_bps=0,
+        fee_bps=0,
+        stop_loss_pct=30,
+    )
+
+    assert trades == []
+    assert sum(int(row["skipped_unbuyable_signal_type"]) for row in filters) == 1
+
+
 def test_executable_first_signal_slippage_and_fees_reduce_return(monkeypatch, tmp_path) -> None:
     dates = pd.bdate_range("2026-01-01", periods=5)
     prepared = _sample_prepared("000001", dates, entry_open=10.0, exit_close=12.0)
@@ -442,6 +535,7 @@ def test_research_first_signal_public_output_keeps_legacy_files(monkeypatch, tmp
 
     monkeypatch.setattr("a_breakout_screener.backtest._load_histories", lambda cache_dir, symbols=None: {"000001": history})
     monkeypatch.setattr("a_breakout_screener.backtest._load_names_from_latest_daily", lambda cache_dir: {"000001": "平安银行"})
+    monkeypatch.setattr("a_breakout_screener.backtest._load_backtest_calendar", lambda config, trading_dates: pd.DataFrame())
     monkeypatch.setattr(
         "a_breakout_screener.backtest._run_first_signal_backtest",
         lambda **kwargs: ([], [{"signal_date": "2026-01-02", "passed": 0, "new_buys": 0}]),
@@ -471,6 +565,7 @@ def test_executable_first_signal_public_output_uses_isolated_files(monkeypatch, 
 
     monkeypatch.setattr("a_breakout_screener.backtest._load_histories", lambda cache_dir, symbols=None: {"000001": history})
     monkeypatch.setattr("a_breakout_screener.backtest._load_names_from_latest_daily", lambda cache_dir: {"000001": "平安银行"})
+    monkeypatch.setattr("a_breakout_screener.backtest._load_backtest_calendar", lambda config, trading_dates: pd.DataFrame())
     monkeypatch.setattr(
         "a_breakout_screener.backtest._run_first_signal_executable_backtest",
         lambda **kwargs: ([], [{"signal_date": "2026-01-02", "passed": 0, "raw_candidates": 0}]),
@@ -543,6 +638,28 @@ def test_executable_html_uses_executable_first_signal_wording() -> None:
         ]
     )
 
+    trades = pd.DataFrame(
+        [
+            {
+                "signal_date": "2026-01-02",
+                "entry_date": "2026-01-05",
+                "exit_date": "2026-01-07",
+                "rank": 1,
+                "code": "000001",
+                "name": "平安银行",
+                "score": 90.0,
+                "entry_price": 10.0,
+                "exit_price": 11.0,
+                "shares": 100,
+                "buy_fee": 1.0,
+                "sell_fee": 1.1,
+                "capital_reserved": 1001.0,
+                "pnl": 97.9,
+                "return_pct": 9.79,
+            }
+        ]
+    )
+
     html = _render_html(
         pd.DataFrame(),
         pd.DataFrame(),
@@ -551,7 +668,7 @@ def test_executable_html_uses_executable_first_signal_wording() -> None:
         long_hold_summary_df=pd.DataFrame(),
         long_hold_trades_df=pd.DataFrame(),
         first_signal_summary_df=summary,
-        first_signal_trades_df=pd.DataFrame(),
+        first_signal_trades_df=trades,
         report_mode="first_signal_executable",
     )
 
@@ -562,6 +679,8 @@ def test_executable_html_uses_executable_first_signal_wording() -> None:
     assert "max_buys_per_day" in html
     assert "lot_size" in html
     assert "peak_capital_used" in html
+    assert "undefined日" not in html
+    assert "capital_reserved" in html
 
 
 def _sample_history(dates: pd.DatetimeIndex) -> pd.DataFrame:
