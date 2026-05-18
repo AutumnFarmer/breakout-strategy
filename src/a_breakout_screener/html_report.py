@@ -193,7 +193,7 @@ HTML_TEMPLATE = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>A股突破选股复核</title>
+  <title>A股选股看板</title>
   <style>
     :root {
       color-scheme: light;
@@ -413,6 +413,80 @@ HTML_TEMPLATE = """<!doctype html>
       border-color: #f1d19b;
       background: #fff7e8;
       color: var(--warn);
+      font-weight: 700;
+    }
+    .zone-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 76px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid #d7e3f8;
+      background: #f2f7ff;
+      color: #285b9f;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .zone-badge.yes {
+      border-color: #f1d19b;
+      background: #fff7e8;
+      color: var(--warn);
+    }
+    .zone-badge.above {
+      border-color: #ffd6dc;
+      background: #fff3f5;
+      color: var(--up);
+    }
+    .zone-badge.below,
+    .zone-badge.unknown {
+      border-color: #d6eadf;
+      background: #f2fbf6;
+      color: var(--down);
+    }
+    .stock-detail {
+      min-width: 170px;
+    }
+    .stock-detail summary {
+      color: var(--accent);
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .stock-detail dl {
+      display: grid;
+      grid-template-columns: auto minmax(70px, 1fr);
+      gap: 4px 10px;
+      min-width: 230px;
+      margin: 8px 0 0;
+      padding: 10px;
+      border: 1px solid #edf0f5;
+      border-radius: 8px;
+      background: #fbfcfe;
+    }
+    .stock-detail dt {
+      color: var(--muted);
+      font-size: 12px;
+      text-align: left;
+      white-space: nowrap;
+    }
+    .stock-detail dd {
+      margin: 0;
+      color: var(--text);
+      font-size: 12px;
+      text-align: right;
+      white-space: nowrap;
+    }
+    .technical-detail {
+      margin-top: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: #fbfcfe;
+    }
+    .technical-detail summary {
+      color: var(--muted);
+      cursor: pointer;
       font-weight: 700;
     }
     .position-positive {
@@ -804,32 +878,32 @@ HTML_TEMPLATE = """<!doctype html>
 </head>
 <body>
   <header>
-    <h1>A股突破选股复核</h1>
+    <h1>A股选股看板</h1>
     <div class="stats">
       <div class="stat"><span>交易日</span><strong id="statDate"></strong></div>
       <div class="stat"><span>扫描股票</span><strong id="statScanned"></strong></div>
       <div class="stat"><span>全量候选</span><strong id="statAllCandidates"></strong></div>
       <div class="stat"><span>展示数量</span><strong id="statCandidates"></strong></div>
       <div class="stat"><span>A/B/C1/C2/D</span><strong id="statPools"></strong></div>
-      <div class="stat"><span>最终动作</span><strong id="statAction"></strong></div>
+      <div class="stat"><span>结论</span><strong id="statAction"></strong></div>
       <div class="stat"><span>数据失败</span><strong id="statFailed"></strong></div>
     </div>
   </header>
   <div class="review-shell">
     <section class="review-section">
-      <h2>日报复核总览</h2>
+      <h2>今日概览</h2>
       <div class="review-grid" id="reportDataStatus"></div>
       <div class="verdict-box" id="reportFinalAction"></div>
     </section>
     <section class="review-section">
       <h2>当前持仓</h2>
-      <p class="review-note">持仓数据写入服务器 <code>data/holdings/positions.json</code>，按最新收盘价估算浮盈亏。</p>
+      <p class="review-note">点候选股后的“已买入”记录买入价和数量，这里会按最新收盘价估算浮盈亏。</p>
       <div id="holdingsStatus" class="review-note"></div>
       <div id="holdingsTable"></div>
     </section>
     <section class="review-section">
-      <h2>市场环境与候选数量</h2>
-      <div class="review-grid" id="reportMarketStatus"></div>
+      <h2>候选分布</h2>
+      <div class="review-grid" id="reportMarketStatus" hidden></div>
       <div class="pool-block" id="reportPoolCounts"></div>
     </section>
     <section class="review-section">
@@ -837,12 +911,12 @@ HTML_TEMPLATE = """<!doctype html>
       <div id="reportThemeDistribution"></div>
     </section>
     <section class="review-section">
-      <h2>分池复核</h2>
+      <h2>候选池</h2>
       <div id="reportPools"></div>
     </section>
     <section class="review-section">
       <h2>AI 复核分析</h2>
-      <p class="review-note">AI选股分析员输出，仅用于辅助复核，不替代交易纪律。</p>
+      <p class="review-note">AI选股分析员输出，仅用于辅助判断。</p>
       <div class="ai-report-content" id="aiReportContent"></div>
     </section>
   </div>
@@ -958,7 +1032,7 @@ HTML_TEMPLATE = """<!doctype html>
     document.getElementById("statAllCandidates").textContent = DASHBOARD.meta.allCandidateCount;
     document.getElementById("statCandidates").textContent = DASHBOARD.meta.candidateCount;
     document.getElementById("statPools").textContent = ["A", "B", "C1", "C2", "D"].map(key => DASHBOARD.meta.poolCounts?.[key] || 0).join("/");
-    document.getElementById("statAction").textContent = DASHBOARD.meta.finalAction || "-";
+    document.getElementById("statAction").textContent = actionLabel(DASHBOARD.meta.finalAction);
     document.getElementById("statFailed").textContent = DASHBOARD.meta.failedCount;
 
     function escapeHtml(value) {
@@ -979,12 +1053,122 @@ HTML_TEMPLATE = """<!doctype html>
     }
 
     function actionSentence(action) {
-      if (action === "BUY_CHECK") return "今日有 A 类标的，进入人工复核；市场环境未确认前不自动视为低风险买入确认。";
-      if (action === "LOW_RISK_BUY_CONFIRMED") return "今日有 A 类标的且市场环境支持，可进入低风险突破买入复核，但不自动交易。";
-      if (action === "RIGHT_TAIL_WATCH") return "今天只有右尾强趋势观察信号，不新增低风险突破仓。";
-      if (action === "WATCH_ONLY") return "今天只观察，不新增突破仓。";
+      if (action === "BUY_CHECK") return "有 A 类候选，先看是否在交易区；偏高或次日高开就不追。";
+      if (action === "LOW_RISK_BUY_CONFIRMED") return "有 A 类候选，仍需确认开盘位置和持仓风险。";
+      if (action === "RIGHT_TAIL_WATCH") return "只有强趋势右侧信号，适合观察，不作为低风险买点。";
+      if (action === "WATCH_ONLY") return "今天只观察，等更明确的确认信号。";
       if (action === "DATA_FAILED") return "今日扫描数据不完整，不做交易判断。";
-      return "今天没有交易价值，不新增突破仓。";
+      return "今天没有明确买点。";
+    }
+
+    function actionLabel(action) {
+      if (action === "BUY_CHECK") return "有A类，人工复核";
+      if (action === "LOW_RISK_BUY_CONFIRMED") return "可买入复核";
+      if (action === "RIGHT_TAIL_WATCH") return "右尾观察";
+      if (action === "WATCH_ONLY") return "只观察";
+      if (action === "DATA_FAILED") return "数据失败";
+      return "无买点";
+    }
+
+    function marketLabel(regime) {
+      if (regime === "STRONG_ATTACK") return "强进攻";
+      if (regime === "CAUTIOUS") return "谨慎";
+      if (regime === "DEFENSIVE") return "防守";
+      return "未接入，保守处理";
+    }
+
+    function signalLabel(signalType) {
+      if (signalType === "A") return "A 周线确认";
+      if (signalType === "B") return "B 日线预警";
+      if (signalType === "C1") return "C1 右尾观察";
+      if (signalType === "C2") return "C2 不追";
+      if (signalType === "D") return "D 排除";
+      return signalType || "-";
+    }
+
+    function buyZoneLabel(status) {
+      if (status === "YES") return "在交易区";
+      if (status === "ABOVE") return "偏高，等回踩";
+      if (status === "BELOW") return "未到交易区";
+      return "待复核";
+    }
+
+    function buyZoneClass(status) {
+      if (status === "YES") return "yes";
+      if (status === "ABOVE") return "above";
+      if (status === "BELOW") return "below";
+      return "unknown";
+    }
+
+    function buyZoneCell(item) {
+      const status = item.buyZoneStatus || "UNKNOWN";
+      const zone = `${fmt(item.buyLow)}-${fmt(item.buyHigh)}`;
+      return `<span class="zone-badge ${buyZoneClass(status)}" title="买入区 ${escapeHtml(zone)}">${escapeHtml(buyZoneLabel(status))}</span>`;
+    }
+
+    function suggestedAction(item) {
+      if (item.signalType === "A") return item.nextDayTradeAction || item.tradeAction || "人工复核";
+      if (item.signalType === "B") return "观察，等周线确认";
+      if (item.signalType === "C1") return "右尾观察，不追高";
+      if (item.signalType === "C2") return item.tradeAction || "不追，等整理";
+      if (item.signalType === "D") return exclusionReason(item);
+      if ((item.growthScore || 0) > 0) return "成长观察，等突破确认";
+      return item.tradeAction || item.hint || item.signalReason || "-";
+    }
+
+    function detailCell(item) {
+      const rows = [
+        ["收盘", fmt(item.latestClose)],
+        ["压力区下沿", fmt(item.zoneLow || item.resistance)],
+        ["压力区中枢", fmt(item.zoneMid || item.resistance)],
+        ["压力区上沿", fmt(item.zoneUpper || item.resistance)],
+        ["突破幅度", `${fmt(item.breakoutPct)}%`],
+        ["成交额倍数", fmt(item.activityRatio || item.volumeRatio)],
+        ["量能来源", item.activitySource === "amount" ? "成交额" : (item.activitySource || "-")],
+        ["触碰次数", item.touches || 0],
+        ["跨度周", item.spanWeeks || 0],
+        ["技术分", fmt(item.score, 1)],
+        ["成长分", item.growthScore > 0 ? fmt(item.growthScore, 1) : "-"],
+        ["买入区", `${fmt(item.buyLow)}-${fmt(item.buyHigh)}`],
+        ["交易止损", fmt(item.tradeStopLoss || item.stopLoss)],
+        ["近5日涨幅%", fmt(item.recent5dPct)],
+        ["近10日涨幅%", fmt(item.recent10dPct)],
+        ["连续涨停", item.consecutiveLimitUpDays >= 2 ? "是" : "否"],
+        ["长上影", item.longUpperShadow ? "是" : "否"],
+        ["营收同比%", fmtPct(item.revenueYoy)],
+        ["净利同比%", fmtPct(item.profitYoy)],
+        ["ROE%", fmtPct(item.roe)],
+      ];
+      const body = rows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join("");
+      return `<details class="stock-detail"><summary>详情</summary><dl>${body}</dl></details>`;
+    }
+
+    function compactRows(items) {
+      return items.map((item, index) => [
+        escapeHtml(index + 1),
+        candidateName(item),
+        escapeHtml(item.code),
+        escapeHtml(item.primaryTag || "未标记"),
+        escapeHtml(signalLabel(item.signalType)),
+        buyZoneCell(item),
+        escapeHtml(suggestedAction(item)),
+        actionButtons(item),
+        detailCell(item),
+      ]);
+    }
+
+    function compactHeaders() {
+      return [
+        { label: "排名" },
+        { label: "股票", left: true },
+        { label: "代码" },
+        { label: "题材", left: true },
+        { label: "类型", left: true },
+        { label: "交易区" },
+        { label: "建议", left: true },
+        { label: "操作", left: true },
+        { label: "详情", left: true },
+      ];
     }
 
     function poolItems(signalType, limit = null) {
@@ -1204,35 +1388,33 @@ HTML_TEMPLATE = """<!doctype html>
     function renderReportSections() {
       const meta = DASHBOARD.meta || {};
       document.getElementById("reportDataStatus").innerHTML = [
-        kv("Trade date", meta.latestTradeDate),
-        kv("Run time", meta.runTime || "-"),
-        kv("Data source", "Tushare + local cache"),
-        kv("Full scan", meta.fullScan ? "true" : "false"),
-        kv("Scanned stocks", meta.scannedCount),
-        kv("Failed stocks", meta.failedCount),
-        kv("Latest price date", meta.latestTradeDate),
-        kv("Data verdict", meta.dataVerdict || "-"),
+        kv("交易日", meta.latestTradeDate),
+        kv("今日结论", actionLabel(meta.finalAction)),
+        kv("A/B/C1", `${poolCount("A")}/${poolCount("B")}/${poolCount("C1")}`),
+        kv("扫描/失败", `${meta.scannedCount}/${meta.failedCount}`),
       ].join("");
       document.getElementById("reportFinalAction").innerHTML = `
-        <strong>Final action: ${escapeHtml(meta.finalAction || "-")}</strong>
-        <p class="review-note">A=${poolCount("A")}，B=${poolCount("B")}，C1=${poolCount("C1")}；Market regime=${escapeHtml(meta.marketRegime || "NOT_EVALUATED")}。</p>
+        <strong>${escapeHtml(actionLabel(meta.finalAction))}</strong>
         <p class="review-note">${escapeHtml(actionSentence(meta.finalAction))}</p>
-        <p class="review-note">由于 Market regime = NOT_EVALUATED，本日报不输出 LOW_RISK_BUY_CONFIRMED，只输出 BUY_CHECK。</p>
+        <details class="technical-detail">
+          <summary>数据细节</summary>
+          <div class="review-grid">
+            ${kv("运行时间", meta.runTime || "-")}
+            ${kv("数据状态", meta.dataVerdict || "-")}
+            ${kv("全量扫描", meta.fullScan ? "是" : "否")}
+            ${kv("展示数量", meta.candidateCount)}
+          </div>
+        </details>
       `;
-      document.getElementById("reportMarketStatus").innerHTML = [
-        kv("Market regime", meta.marketRegime || "NOT_EVALUATED"),
-        kv("主线集中度", meta.themeConcentration || "低"),
-        kv("四指数周线", "未接入"),
-        kv("成交/涨跌停", "未接入"),
-      ].join("");
+      document.getElementById("reportMarketStatus").innerHTML = "";
       document.getElementById("reportPoolCounts").innerHTML = renderSimpleTable(
-        [{ label: "类型", left: true }, { label: "数量" }, { label: "交易含义", left: true }],
+        [{ label: "类型", left: true }, { label: "数量" }, { label: "看什么", left: true }],
         [
-          [poolJumpButton("A 周线确认", "pool-A"), escapeHtml(poolCount("A")), "可交易观察"],
-          [poolJumpButton("B 日线预警", "pool-B"), escapeHtml(poolCount("B")), "观察，等周线确认"],
-          [poolJumpButton("C1 强趋势右尾", "pool-C1"), escapeHtml(poolCount("C1")), "右尾观察，不是低风险买点"],
-          [poolJumpButton("C2 / D 排除", "pool-no-chase"), escapeHtml(poolCount("C2") + poolCount("D")), "不追或排除"],
-          [poolJumpButton("成长观察", "pool-growth"), escapeHtml(growthItems(50).length), "只跟踪，不买"],
+          [poolJumpButton("A 周线确认", "pool-A"), escapeHtml(poolCount("A")), "重点看是否还在交易区"],
+          [poolJumpButton("B 日线预警", "pool-B"), escapeHtml(poolCount("B")), "先观察，等周线确认"],
+          [poolJumpButton("C1 强趋势", "pool-C1"), escapeHtml(poolCount("C1")), "看题材强度，不追高"],
+          [poolJumpButton("C2 / D 不追", "pool-no-chase"), escapeHtml(poolCount("C2") + poolCount("D")), "避开追高和无效信号"],
+          [poolJumpButton("成长观察", "pool-growth"), escapeHtml(growthItems(50).length), "跟踪，不作为买入清单"],
         ],
         "暂无候选数量。"
       );
@@ -1245,7 +1427,7 @@ HTML_TEMPLATE = """<!doctype html>
           { label: "C1" },
           { label: "C2" },
           { label: "合计" },
-          { label: "判断", left: true },
+          { label: "建议", left: true },
         ],
         themes.map(([theme, row]) => [
           themeExpandButton(theme),
@@ -1259,64 +1441,13 @@ HTML_TEMPLATE = """<!doctype html>
         "无候选，无法判断题材共振。"
       ) + '<div id="themeDetail" class="theme-detail" hidden></div>';
 
-      const coreHeaders = [
-        { label: "排名" }, { label: "股票", left: true }, { label: "操作", left: true }, { label: "代码" }, { label: "题材", left: true },
-        { label: "收盘" }, { label: "压力上沿" }, { label: "突破%" }, { label: "成交额倍数" },
-        { label: "量能来源" }, { label: "触碰" }, { label: "跨度周" }, { label: "技术分" },
-        { label: "成长分" }, { label: "买入区" }, { label: "交易止损" },
-      ];
-      const actionHeaders = [
-        ...coreHeaders,
-        { label: "是否在买入区" },
-        { label: "次日高开限制", left: true },
-        { label: "建议动作", left: true },
-        { label: "结论", left: true },
-      ];
-      const observationHeaders = [...coreHeaders, { label: "结论", left: true }];
-      const c1Headers = [
-        { label: "排名" }, { label: "股票", left: true }, { label: "操作", left: true }, { label: "代码" }, { label: "题材", left: true },
-        { label: "收盘" }, { label: "压力上沿" }, { label: "突破%" }, { label: "成交额倍数" },
-        { label: "近5日涨幅%" }, { label: "近10日涨幅%" }, { label: "是否连续涨停" },
-        { label: "是否长上影" }, { label: "技术分" }, { label: "风险", left: true }, { label: "结论", left: true },
-      ];
-      const c1Rows = poolItems("C1", 5).map((item, index) => [
-        escapeHtml(index + 1),
-        candidateName(item),
-        actionButtons(item),
-        escapeHtml(item.code),
-        escapeHtml(item.primaryTag || "未标记"),
-        escapeHtml(fmt(item.latestClose)),
-        escapeHtml(fmt(item.zoneUpper || item.resistance)),
-        escapeHtml(fmt(item.breakoutPct)),
-        escapeHtml(fmt(item.activityRatio || item.volumeRatio)),
-        escapeHtml(fmt(item.recent5dPct)),
-        escapeHtml(fmt(item.recent10dPct)),
-        escapeHtml(item.consecutiveLimitUpDays >= 2 ? "是" : "否"),
-        escapeHtml(item.longUpperShadow ? "是" : "否"),
-        escapeHtml(fmt(item.score, 1)),
-        escapeHtml((item.breakoutPct || 0) >= 8 ? "已远离低风险买点" : "强趋势但追高风险"),
-        escapeHtml(item.tradeAction || "右尾观察，不低吸"),
-      ]);
-      const noChaseRows = noChaseItems(5).map(item => [candidateName(item), actionButtons(item), escapeHtml(item.code), escapeHtml(exclusionReason(item))]);
-      const growthRows = growthItems(10).map((item, index) => [
-        escapeHtml(index + 1),
-        candidateName(item),
-        actionButtons(item),
-        escapeHtml(item.code),
-        escapeHtml(item.primaryTag || "未标记"),
-        escapeHtml(fmt(item.growthScore, 1)),
-        escapeHtml(fmtPct(item.revenueYoy)),
-        escapeHtml(fmtPct(item.profitYoy)),
-        escapeHtml(fmtPct(item.roe)),
-        escapeHtml(fmt(item.breakoutPct)),
-        escapeHtml(item.signalType === "A" ? "回踩不破压力区上沿 + 缩量企稳" : "周线确认 + 成交额倍数>1.8"),
-      ]);
+      const headers = compactHeaders();
       document.getElementById("reportPools").innerHTML = [
-        `<div class="pool-block" id="pool-A"><h3>A类：周线确认突破池 <span class="pill">${poolCount("A")}只</span></h3>${renderSimpleTable(actionHeaders, coreRows(poolItems("A"), true), "今日 A 类数量：0。没有可直接进入低风险突破买入观察的标的。")}</div>`,
-        `<div class="pool-block" id="pool-B"><h3>B类：日线预警池 <span class="pill warn">${poolCount("B")}只</span></h3>${renderSimpleTable(observationHeaders, coreRows(poolItems("B", 10), false), "今日 B 类数量：0。")}</div>`,
-        `<div class="pool-block" id="pool-C1"><h3>C1类：强趋势右尾观察池 <span class="pill warn">${poolCount("C1")}只</span></h3>${renderSimpleTable(c1Headers, c1Rows, "今日 C1 类数量：0。")}</div>`,
-        `<div class="pool-block" id="pool-no-chase"><h3>C2 / D 排除摘要</h3>${renderSimpleTable([{ label: "股票", left: true }, { label: "操作", left: true }, { label: "代码" }, { label: "原因", left: true }], noChaseRows, "无重点不追标的。")}</div>`,
-        `<div class="pool-block" id="pool-growth"><h3>成长观察池</h3><p class="review-note">这些不是买入清单，只是后续重点跟踪池。</p>${renderSimpleTable([{ label: "排名" }, { label: "股票", left: true }, { label: "操作", left: true }, { label: "代码" }, { label: "题材", left: true }, { label: "成长分" }, { label: "营收同比%" }, { label: "净利同比%" }, { label: "ROE%" }, { label: "距压力区%" }, { label: "观察触发条件", left: true }], growthRows, "暂无成长分可用的观察对象。")}</div>`,
+        `<div class="pool-block" id="pool-A"><h3>A类：周线确认突破池 <span class="pill">${poolCount("A")}只</span></h3>${renderSimpleTable(headers, compactRows(poolItems("A")), "今日 A 类数量：0。")}</div>`,
+        `<div class="pool-block" id="pool-B"><h3>B类：日线预警池 <span class="pill warn">${poolCount("B")}只</span></h3>${renderSimpleTable(headers, compactRows(poolItems("B", 10)), "今日 B 类数量：0。")}</div>`,
+        `<div class="pool-block" id="pool-C1"><h3>C1类：强趋势右尾观察池 <span class="pill warn">${poolCount("C1")}只</span></h3>${renderSimpleTable(headers, compactRows(poolItems("C1", 5)), "今日 C1 类数量：0。")}</div>`,
+        `<div class="pool-block" id="pool-no-chase"><h3>C2 / D：不追池</h3>${renderSimpleTable(headers, compactRows(noChaseItems(5)), "无重点不追标的。")}</div>`,
+        `<div class="pool-block" id="pool-growth"><h3>成长观察池</h3>${renderSimpleTable(headers, compactRows(growthItems(10)), "暂无成长分可用的观察对象。")}</div>`,
       ].join("");
       renderMarkdownLike(document.getElementById("aiReportContent"), DASHBOARD.aiAnalysis || "");
       bindReportActions();
@@ -1362,40 +1493,13 @@ HTML_TEMPLATE = """<!doctype html>
       const target = document.getElementById("themeDetail");
       if (!target || !theme) return;
       const items = itemsByTheme(theme);
-      const rows = items.map((item, index) => [
-        escapeHtml(index + 1),
-        escapeHtml(item.signalType || "-"),
-        candidateName(item),
-        actionButtons(item),
-        escapeHtml(item.code),
-        escapeHtml(fmt(item.latestClose)),
-        escapeHtml(fmt(item.breakoutPct)),
-        escapeHtml(fmt(item.activityRatio || item.volumeRatio)),
-        escapeHtml(fmt(item.score, 1)),
-        escapeHtml(item.tradeAction || item.hint || item.signalReason || "-"),
-      ]);
       target.hidden = false;
       target.innerHTML = `
         <div class="theme-detail-head">
           <h3>${escapeHtml(theme)} 候选明细 <span class="pill">${items.length}只</span></h3>
           <button type="button" class="action-button" data-close-theme-detail="1">收起</button>
         </div>
-        ${renderSimpleTable(
-          [
-            { label: "排名" },
-            { label: "类型" },
-            { label: "股票", left: true },
-            { label: "操作", left: true },
-            { label: "代码" },
-            { label: "收盘" },
-            { label: "突破%" },
-            { label: "成交额倍数" },
-            { label: "技术分" },
-            { label: "结论", left: true },
-          ],
-          rows,
-          "该题材暂无候选。"
-        )}
+        ${renderSimpleTable(compactHeaders(), compactRows(items), "该题材暂无候选。")}
       `;
       target.querySelector("[data-close-theme-detail]")?.addEventListener("click", () => {
         target.hidden = true;
@@ -2020,36 +2124,7 @@ HTML_TEMPLATE = """<!doctype html>
         return;
       }
       panel.style.display = "block";
-      content.textContent = "";
-      let list = null;
-      text.split("\\n").forEach(rawLine => {
-        const line = rawLine.trim();
-        if (!line) {
-          list = null;
-          return;
-        }
-        if (line.startsWith("## ")) {
-          list = null;
-          const heading = document.createElement("h3");
-          heading.textContent = line.replace(/^##\\s+/, "");
-          content.appendChild(heading);
-          return;
-        }
-        if (line.startsWith("- ") || /^\\d+\\.\\s+/.test(line)) {
-          if (!list) {
-            list = document.createElement("ul");
-            content.appendChild(list);
-          }
-          const item = document.createElement("li");
-          item.textContent = line.replace(/^[-*]\\s+/, "").replace(/^\\d+\\.\\s+/, "");
-          list.appendChild(item);
-          return;
-        }
-        list = null;
-        const paragraph = document.createElement("p");
-        paragraph.textContent = line;
-        content.appendChild(paragraph);
-      });
+      renderMarkdownLike(content, text);
     }
 
     canvas.addEventListener("pointerup", endDrag);
