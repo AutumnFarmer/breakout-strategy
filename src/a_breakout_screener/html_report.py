@@ -331,6 +331,19 @@ HTML_TEMPLATE = """<!doctype html>
     .review-table-wrap .left {
       text-align: left;
     }
+    .link-button {
+      border: 0;
+      padding: 0;
+      background: transparent;
+      color: var(--accent);
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      text-align: left;
+    }
+    .link-button:hover {
+      text-decoration: underline;
+    }
     .pill {
       display: inline-flex;
       align-items: center;
@@ -350,6 +363,33 @@ HTML_TEMPLATE = """<!doctype html>
     }
     .pool-block {
       margin-top: 12px;
+      scroll-margin-top: 16px;
+    }
+    .pool-block.flash {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      transition: outline-color .2s ease;
+    }
+    .theme-detail {
+      margin-top: 12px;
+      padding: 12px;
+      border: 1px solid #d7e3f8;
+      border-radius: 8px;
+      background: #f7fbff;
+      scroll-margin-top: 16px;
+    }
+    .theme-detail[hidden] {
+      display: none;
+    }
+    .theme-detail-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+    .theme-detail-head h3 {
+      margin: 0;
     }
     .action-buttons {
       display: inline-flex;
@@ -449,6 +489,31 @@ HTML_TEMPLATE = """<!doctype html>
     .ai-report-content ul {
       margin: 6px 0 8px 18px;
       padding: 0;
+    }
+    .ai-report-content table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 8px 0 12px;
+      font-size: 12px;
+    }
+    .ai-report-content th,
+    .ai-report-content td {
+      padding: 7px 8px;
+      border: 1px solid #edf0f5;
+      text-align: left;
+      white-space: normal;
+    }
+    .ai-report-content th {
+      background: #f9fafc;
+      color: var(--muted);
+      font-weight: 700;
+    }
+    .ai-report-content code {
+      padding: 1px 4px;
+      border-radius: 4px;
+      background: #eef2f7;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
     }
     main {
       display: grid;
@@ -957,6 +1022,13 @@ HTML_TEMPLATE = """<!doctype html>
         .slice(0, limit);
     }
 
+    function itemsByTheme(theme) {
+      const signalOrder = { A: 0, B: 1, C1: 2, C2: 3, D: 4 };
+      return DASHBOARD.candidates
+        .filter(item => (item.primaryTag || "未标记") === theme)
+        .sort((a, b) => (signalOrder[a.signalType] ?? 9) - (signalOrder[b.signalType] ?? 9) || (b.score || 0) - (a.score || 0));
+    }
+
     function themeJudgement(row) {
       if (row.A > 0 && row.total >= 2) return "有A类共振，重点复核";
       if (row.total >= 4) return "有共振，重点观察";
@@ -984,6 +1056,14 @@ HTML_TEMPLATE = """<!doctype html>
         return `<tr>${headers.map((header, idx) => `<td class="${header.left ? "left" : ""}">${row[idx]}</td>`).join("")}</tr>`;
       }).join("");
       return `<div class="review-table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+    }
+
+    function poolJumpButton(label, targetId) {
+      return `<button type="button" class="link-button" data-pool-target="${escapeHtml(targetId)}">${escapeHtml(label)}</button>`;
+    }
+
+    function themeExpandButton(theme) {
+      return `<button type="button" class="link-button" data-theme-key="${escapeHtml(theme)}">${escapeHtml(theme)}</button>`;
     }
 
     function candidateName(item) {
@@ -1031,41 +1111,94 @@ HTML_TEMPLATE = """<!doctype html>
       });
     }
 
+    function inlineMarkdown(text) {
+      return escapeHtml(text)
+        .replace(/`([^`]+)`/g, "<code>$1</code>")
+        .replace(/\\*\\*([^*]+)\\*\\*/g, "<strong>$1</strong>")
+        .replace(/__([^_]+)__/g, "<strong>$1</strong>");
+    }
+
+    function splitMarkdownTableRow(line) {
+      return line.trim().replace(/^\\|/, "").replace(/\\|$/, "").split("|").map(cell => cell.trim());
+    }
+
+    function isMarkdownTableSeparator(line) {
+      return /^\\s*\\|?\\s*:?-{3,}:?\\s*(\\|\\s*:?-{3,}:?\\s*)+\\|?\\s*$/.test(line);
+    }
+
+    function renderMarkdownTable(lines) {
+      const headers = splitMarkdownTableRow(lines[0]);
+      const rows = lines.slice(2).map(splitMarkdownTableRow);
+      const head = headers.map(cell => `<th>${inlineMarkdown(cell)}</th>`).join("");
+      const body = rows.map(row => `<tr>${headers.map((_, idx) => `<td>${inlineMarkdown(row[idx] || "")}</td>`).join("")}</tr>`).join("");
+      return `<div class="review-table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+    }
+
     function renderMarkdownLike(target, text) {
-      target.textContent = "";
       if (!text) {
         target.innerHTML = '<p class="review-note">未启用或未生成 AI 复核分析。</p>';
         return;
       }
-      let list = null;
-      text.split("\\n").forEach(rawLine => {
-        const line = rawLine.trim();
+      const lines = text.split("\\n");
+      const parts = [];
+      let idx = 0;
+      while (idx < lines.length) {
+        const line = lines[idx].trim();
         if (!line) {
-          list = null;
-          return;
+          idx += 1;
+          continue;
         }
-        if (line.startsWith("## ")) {
-          list = null;
-          const heading = document.createElement("h3");
-          heading.textContent = line.replace(/^##\\s+/, "");
-          target.appendChild(heading);
-          return;
-        }
-        if (line.startsWith("- ") || /^\\d+\\.\\s+/.test(line)) {
-          if (!list) {
-            list = document.createElement("ul");
-            target.appendChild(list);
+        if (line.includes("|") && idx + 1 < lines.length && isMarkdownTableSeparator(lines[idx + 1])) {
+          const tableLines = [lines[idx], lines[idx + 1]];
+          idx += 2;
+          while (idx < lines.length && lines[idx].includes("|") && lines[idx].trim()) {
+            tableLines.push(lines[idx]);
+            idx += 1;
           }
-          const item = document.createElement("li");
-          item.textContent = line.replace(/^[-*]\\s+/, "").replace(/^\\d+\\.\\s+/, "");
-          list.appendChild(item);
-          return;
+          parts.push(renderMarkdownTable(tableLines));
+          continue;
         }
-        list = null;
-        const paragraph = document.createElement("p");
-        paragraph.textContent = line;
-        target.appendChild(paragraph);
-      });
+        const heading = line.match(/^(#{1,4})\\s+(.+)$/);
+        if (heading) {
+          const level = heading[1].length <= 2 ? "h3" : "h4";
+          parts.push(`<${level}>${inlineMarkdown(heading[2])}</${level}>`);
+          idx += 1;
+          continue;
+        }
+        if (line.startsWith("- ") || line.startsWith("* ") || /^\\d+\\.\\s+/.test(line)) {
+          const ordered = /^\\d+\\.\\s+/.test(line);
+          const tag = ordered ? "ol" : "ul";
+          const items = [];
+          while (idx < lines.length) {
+            const itemLine = lines[idx].trim();
+            if (ordered && /^\\d+\\.\\s+/.test(itemLine)) {
+              items.push(`<li>${inlineMarkdown(itemLine.replace(/^\\d+\\.\\s+/, ""))}</li>`);
+              idx += 1;
+              continue;
+            }
+            if (!ordered && (itemLine.startsWith("- ") || itemLine.startsWith("* "))) {
+              items.push(`<li>${inlineMarkdown(itemLine.replace(/^[-*]\\s+/, ""))}</li>`);
+              idx += 1;
+              continue;
+            }
+            break;
+          }
+          parts.push(`<${tag}>${items.join("")}</${tag}>`);
+          continue;
+        }
+        const paragraphLines = [line];
+        idx += 1;
+        while (idx < lines.length) {
+          const next = lines[idx].trim();
+          if (!next || next.startsWith("#") || next.startsWith("- ") || next.startsWith("* ") || /^\\d+\\.\\s+/.test(next) || (next.includes("|") && idx + 1 < lines.length && isMarkdownTableSeparator(lines[idx + 1]))) {
+            break;
+          }
+          paragraphLines.push(next);
+          idx += 1;
+        }
+        parts.push(`<p>${inlineMarkdown(paragraphLines.join(" "))}</p>`);
+      }
+      target.innerHTML = parts.join("");
     }
 
     function renderReportSections() {
@@ -1095,13 +1228,12 @@ HTML_TEMPLATE = """<!doctype html>
       document.getElementById("reportPoolCounts").innerHTML = renderSimpleTable(
         [{ label: "类型", left: true }, { label: "数量" }, { label: "交易含义", left: true }],
         [
-          ["A 周线确认", String(poolCount("A")), "可交易观察"],
-          ["B 日线预警", String(poolCount("B")), "观察，等周线确认"],
-          ["C1 强趋势右尾", String(poolCount("C1")), "右尾观察，不是低风险买点"],
-          ["C2 不追", String(poolCount("C2")), "不追，等重新整理"],
-          ["D 排除/突破不足", String(poolCount("D")), "排除"],
-          ["成长观察", String(growthItems(50).length), "只跟踪，不买"],
-        ].map(row => row.map(escapeHtml)),
+          [poolJumpButton("A 周线确认", "pool-A"), escapeHtml(poolCount("A")), "可交易观察"],
+          [poolJumpButton("B 日线预警", "pool-B"), escapeHtml(poolCount("B")), "观察，等周线确认"],
+          [poolJumpButton("C1 强趋势右尾", "pool-C1"), escapeHtml(poolCount("C1")), "右尾观察，不是低风险买点"],
+          [poolJumpButton("C2 / D 排除", "pool-no-chase"), escapeHtml(poolCount("C2") + poolCount("D")), "不追或排除"],
+          [poolJumpButton("成长观察", "pool-growth"), escapeHtml(growthItems(50).length), "只跟踪，不买"],
+        ],
         "暂无候选数量。"
       );
       const themes = themeRows();
@@ -1116,7 +1248,7 @@ HTML_TEMPLATE = """<!doctype html>
           { label: "判断", left: true },
         ],
         themes.map(([theme, row]) => [
-          escapeHtml(theme),
+          themeExpandButton(theme),
           escapeHtml(row.A),
           escapeHtml(row.B),
           escapeHtml(row.C1),
@@ -1125,7 +1257,7 @@ HTML_TEMPLATE = """<!doctype html>
           escapeHtml(themeJudgement(row)),
         ]),
         "无候选，无法判断题材共振。"
-      );
+      ) + '<div id="themeDetail" class="theme-detail" hidden></div>';
 
       const coreHeaders = [
         { label: "排名" }, { label: "股票", left: true }, { label: "操作", left: true }, { label: "代码" }, { label: "题材", left: true },
@@ -1180,17 +1312,27 @@ HTML_TEMPLATE = """<!doctype html>
         escapeHtml(item.signalType === "A" ? "回踩不破压力区上沿 + 缩量企稳" : "周线确认 + 成交额倍数>1.8"),
       ]);
       document.getElementById("reportPools").innerHTML = [
-        `<div class="pool-block"><h3>A类：周线确认突破池 <span class="pill">${poolCount("A")}只</span></h3>${renderSimpleTable(actionHeaders, coreRows(poolItems("A"), true), "今日 A 类数量：0。没有可直接进入低风险突破买入观察的标的。")}</div>`,
-        `<div class="pool-block"><h3>B类：日线预警池 <span class="pill warn">${poolCount("B")}只</span></h3>${renderSimpleTable(observationHeaders, coreRows(poolItems("B", 10), false), "今日 B 类数量：0。")}</div>`,
-        `<div class="pool-block"><h3>C1类：强趋势右尾观察池 <span class="pill warn">${poolCount("C1")}只</span></h3>${renderSimpleTable(c1Headers, c1Rows, "今日 C1 类数量：0。")}</div>`,
-        `<div class="pool-block"><h3>C2 / D 排除摘要</h3>${renderSimpleTable([{ label: "股票", left: true }, { label: "操作", left: true }, { label: "代码" }, { label: "原因", left: true }], noChaseRows, "无重点不追标的。")}</div>`,
-        `<div class="pool-block"><h3>成长观察池</h3><p class="review-note">这些不是买入清单，只是后续重点跟踪池。</p>${renderSimpleTable([{ label: "排名" }, { label: "股票", left: true }, { label: "操作", left: true }, { label: "代码" }, { label: "题材", left: true }, { label: "成长分" }, { label: "营收同比%" }, { label: "净利同比%" }, { label: "ROE%" }, { label: "距压力区%" }, { label: "观察触发条件", left: true }], growthRows, "暂无成长分可用的观察对象。")}</div>`,
+        `<div class="pool-block" id="pool-A"><h3>A类：周线确认突破池 <span class="pill">${poolCount("A")}只</span></h3>${renderSimpleTable(actionHeaders, coreRows(poolItems("A"), true), "今日 A 类数量：0。没有可直接进入低风险突破买入观察的标的。")}</div>`,
+        `<div class="pool-block" id="pool-B"><h3>B类：日线预警池 <span class="pill warn">${poolCount("B")}只</span></h3>${renderSimpleTable(observationHeaders, coreRows(poolItems("B", 10), false), "今日 B 类数量：0。")}</div>`,
+        `<div class="pool-block" id="pool-C1"><h3>C1类：强趋势右尾观察池 <span class="pill warn">${poolCount("C1")}只</span></h3>${renderSimpleTable(c1Headers, c1Rows, "今日 C1 类数量：0。")}</div>`,
+        `<div class="pool-block" id="pool-no-chase"><h3>C2 / D 排除摘要</h3>${renderSimpleTable([{ label: "股票", left: true }, { label: "操作", left: true }, { label: "代码" }, { label: "原因", left: true }], noChaseRows, "无重点不追标的。")}</div>`,
+        `<div class="pool-block" id="pool-growth"><h3>成长观察池</h3><p class="review-note">这些不是买入清单，只是后续重点跟踪池。</p>${renderSimpleTable([{ label: "排名" }, { label: "股票", left: true }, { label: "操作", left: true }, { label: "代码" }, { label: "题材", left: true }, { label: "成长分" }, { label: "营收同比%" }, { label: "净利同比%" }, { label: "ROE%" }, { label: "距压力区%" }, { label: "观察触发条件", left: true }], growthRows, "暂无成长分可用的观察对象。")}</div>`,
       ].join("");
       renderMarkdownLike(document.getElementById("aiReportContent"), DASHBOARD.aiAnalysis || "");
       bindReportActions();
     }
 
     function bindReportActions() {
+      document.querySelectorAll("[data-pool-target]").forEach(button => {
+        if (button.dataset.bound === "1") return;
+        button.dataset.bound = "1";
+        button.addEventListener("click", () => scrollToPool(button.dataset.poolTarget));
+      });
+      document.querySelectorAll("[data-theme-key]").forEach(button => {
+        if (button.dataset.bound === "1") return;
+        button.dataset.bound = "1";
+        button.addEventListener("click", () => showThemeDetail(button.dataset.themeKey));
+      });
       document.querySelectorAll("[data-chart-code]").forEach(button => {
         if (button.dataset.bound === "1") return;
         button.dataset.bound = "1";
@@ -1206,6 +1348,60 @@ HTML_TEMPLATE = """<!doctype html>
         button.dataset.bound = "1";
         button.addEventListener("click", () => deletePosition(button.dataset.deletePosition));
       });
+    }
+
+    function scrollToPool(targetId) {
+      const target = document.getElementById(targetId || "");
+      if (!target) return;
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      target.classList.add("flash");
+      window.setTimeout(() => target.classList.remove("flash"), 1200);
+    }
+
+    function showThemeDetail(theme) {
+      const target = document.getElementById("themeDetail");
+      if (!target || !theme) return;
+      const items = itemsByTheme(theme);
+      const rows = items.map((item, index) => [
+        escapeHtml(index + 1),
+        escapeHtml(item.signalType || "-"),
+        candidateName(item),
+        actionButtons(item),
+        escapeHtml(item.code),
+        escapeHtml(fmt(item.latestClose)),
+        escapeHtml(fmt(item.breakoutPct)),
+        escapeHtml(fmt(item.activityRatio || item.volumeRatio)),
+        escapeHtml(fmt(item.score, 1)),
+        escapeHtml(item.tradeAction || item.hint || item.signalReason || "-"),
+      ]);
+      target.hidden = false;
+      target.innerHTML = `
+        <div class="theme-detail-head">
+          <h3>${escapeHtml(theme)} 候选明细 <span class="pill">${items.length}只</span></h3>
+          <button type="button" class="action-button" data-close-theme-detail="1">收起</button>
+        </div>
+        ${renderSimpleTable(
+          [
+            { label: "排名" },
+            { label: "类型" },
+            { label: "股票", left: true },
+            { label: "操作", left: true },
+            { label: "代码" },
+            { label: "收盘" },
+            { label: "突破%" },
+            { label: "成交额倍数" },
+            { label: "技术分" },
+            { label: "结论", left: true },
+          ],
+          rows,
+          "该题材暂无候选。"
+        )}
+      `;
+      target.querySelector("[data-close-theme-detail]")?.addEventListener("click", () => {
+        target.hidden = true;
+      });
+      bindReportActions();
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
     }
 
     function openChart(code) {

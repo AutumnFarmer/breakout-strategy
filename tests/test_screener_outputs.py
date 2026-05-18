@@ -59,6 +59,9 @@ def test_write_outputs_creates_report_files(tmp_path) -> None:
     assert "api/holdings" in html
     assert "查看K线" in html
     assert "已买入" in html
+    assert "data-pool-target" in html
+    assert "data-theme-key" in html
+    assert "renderMarkdownTable" in html
     assert "金融科技" in html
     assert "成长分" in html
     assert "revenueYoy" in html
