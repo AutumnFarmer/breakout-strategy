@@ -65,4 +65,5 @@ def test_render_markdown_report_handles_empty_candidates() -> None:
     report = render_markdown_report([], scanned_count=10, failed_count=1, latest_trade_date="2026-05-11")
 
     assert "今日没有符合突破条件的候选" in report
-    assert "扫描股票数: 10" in report
+    assert "Scanned stocks: 10" in report
+    assert "Final action: NO_BUY" in report

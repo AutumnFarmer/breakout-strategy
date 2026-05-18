@@ -9,7 +9,7 @@ from pathlib import Path
 from .config import AppConfig, load_config
 from .emailer import send_report, validate_email_transport
 from .backtest import run_backtest, run_first_signal_backtest, run_first_signal_executable_backtest
-from .screener import run_scan
+from .screener import build_daily_email_subject, run_scan
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -116,12 +116,12 @@ def _run(args: argparse.Namespace, config: AppConfig) -> int:
         should_send = False
     if should_send:
         body = result.markdown_path.read_text(encoding="utf-8")
-        subject = f"{config.email.subject_prefix} {result.latest_trade_date}: {len(result.candidates)} 只候选"
+        subject = build_daily_email_subject(result)
         send_report(
             email_config=config.email,
             subject=subject,
             body=body,
-            attachments=[result.csv_path, result.xlsx_path, result.html_path],
+            attachments=[],
         )
         print("邮件发送完成")
     else:

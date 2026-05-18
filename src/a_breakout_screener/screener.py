@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -42,6 +43,8 @@ class ScanResult:
     latest_trade_date: str
     all_candidate_count: int = 0
     pool_counts: dict[str, int] = field(default_factory=dict)
+    run_time: str = ""
+    full_scan: bool = True
 
 
 def run_scan(
@@ -51,6 +54,8 @@ def run_scan(
     force_refresh: bool = False,
 ) -> ScanResult:
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    run_time = now.strftime("%Y-%m-%d %H:%M:%S")
+    full_scan = symbols is None and limit is None
     end_date = now.date()
     spot = fetch_spot()
     spot_trade_date = _latest_spot_trade_date(spot)
@@ -165,6 +170,8 @@ def run_scan(
         ai_analysis=ai_analysis,
         pools=pools,
         pool_counts=pool_counts,
+        run_time=run_time,
+        full_scan=full_scan,
     )
     ai_analysis_path = output_dir / "ai_analysis.md" if ai_analysis else None
     _write_failures(output_dir / "failures.csv", failures)
@@ -181,6 +188,8 @@ def run_scan(
         latest_trade_date=latest_trade_date,
         all_candidate_count=len(all_candidates),
         pool_counts=pool_counts,
+        run_time=run_time,
+        full_scan=full_scan,
     )
 
 
@@ -194,6 +203,8 @@ def write_outputs(
     ai_analysis: str = "",
     pools: dict[str, list[Candidate]] | None = None,
     pool_counts: dict[str, int] | None = None,
+    run_time: str = "",
+    full_scan: bool = True,
 ) -> tuple[Path, Path, Path, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     rows = [candidate.to_chinese_dict() for candidate in candidates]
@@ -216,7 +227,16 @@ def write_outputs(
             index=False,
             encoding="utf-8-sig",
         )
-    markdown = render_markdown_report(candidates, scanned_count, failed_count, latest_trade_date, pool_counts=pool_counts)
+    markdown = render_markdown_report(
+        candidates,
+        scanned_count,
+        failed_count,
+        latest_trade_date,
+        pool_counts=pool_counts,
+        pools=pools,
+        run_time=run_time,
+        full_scan=full_scan,
+    )
     if ai_analysis:
         markdown += "\n## AI选股分析员\n\n" + ai_analysis.strip() + "\n"
         (output_dir / "ai_analysis.md").write_text(ai_analysis.strip() + "\n", encoding="utf-8")
@@ -240,69 +260,509 @@ def render_markdown_report(
     failed_count: int,
     latest_trade_date: str,
     pool_counts: dict[str, int] | None = None,
+    pools: dict[str, list[Candidate]] | None = None,
+    run_time: str = "",
+    full_scan: bool = True,
 ) -> str:
     pool_counts = pool_counts or {}
     all_candidate_count = sum(pool_counts.values()) if pool_counts else len(candidates)
+    run_time = run_time or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+    final_action = _final_action(scanned_count, failed_count, pool_counts)
+    data_verdict = _data_verdict(scanned_count, failed_count)
+    a_count = pool_counts.get("A", 0)
+    b_count = pool_counts.get("B", 0)
+    c1_count = pool_counts.get("C1", 0)
+    c2_count = pool_counts.get("C2", 0)
+    d_count = pool_counts.get("D", 0)
+    growth_items = _growth_watch_items(candidates, limit=10)
     lines = [
-        f"# A股突破选股日报 {latest_trade_date}",
+        "# A股突破选股日报",
         "",
-        f"- 扫描股票数: {scanned_count}",
-        f"- 数据失败数: {failed_count}",
-        f"- 全量候选总数: {all_candidate_count}",
-        f"- 展示候选数: {len(candidates)}",
-        f"- A类周线确认: {pool_counts.get('A', 0)}",
-        f"- B类日线预警: {pool_counts.get('B', 0)}",
-        f"- C1强趋势观察: {pool_counts.get('C1', 0)}",
-        f"- C2突破不追: {pool_counts.get('C2', 0)}",
-        f"- D类排除/突破不足: {pool_counts.get('D', 0)}",
-        f"- 今日可交易观察: {pool_counts.get('A', 0)}",
+        "## 1. 数据状态",
         "",
-        "说明: 这是规则筛选和风险观察清单，不是投资建议。请结合大盘环境、行业事件和个人仓位做二次判断。",
+        f"Trade date: {latest_trade_date}",
+        f"Run time: {run_time}",
+        "Data source: Tushare + local cache",
+        f"Full scan: {'true' if full_scan else 'false'}",
+        f"Scanned stocks: {scanned_count}",
+        f"Failed stocks: {failed_count}",
+        f"All candidate signals: {all_candidate_count}",
+        f"Displayed candidates: {len(candidates)}",
+        f"Latest price date: {latest_trade_date}",
+        "Calendar source: Tushare trade_cal",
+        f"History cache status: {'complete' if failed_count == 0 else 'partial'}",
+        "",
+        f"Data verdict: {data_verdict}",
+        "",
+        "## 2. 今日最终结论",
+        "",
+        f"Final action: {final_action}",
+        "",
+        "原因：",
+        f"- A类周线确认数量：{a_count}",
+        f"- B类日线预警数量：{b_count}",
+        f"- C1强趋势数量：{c1_count}",
+        "- 市场环境：未接入四指数周线环境判断，按个股信号保守处理",
+        f"- 今日交易纪律：{_final_action_reason(final_action)}",
+        "",
+        "一句话结论：",
+        _final_action_sentence(final_action),
+        "",
+        "## 3. 市场环境",
+        "",
+        "Market regime: NOT_EVALUATED",
+        "",
+        "指数状态：",
+        "| 指数 | 收盘 | 20周线 | 是否站上 | 20周线方向 |",
+        "|---|---:|---:|---|---|",
+        "| 上证指数 | - | - | - | - |",
+        "| 沪深300 | - | - | - | - |",
+        "| 创业板指 | - | - | - | - |",
+        "| 科创50 | - | - | - | - |",
+        "",
+        "成交状态：",
+        "- 两市成交额：-",
+        "- 相对20日均成交额：-",
+        "- 涨停数量：-",
+        "- 跌停数量：-",
+        "- 主线集中度：" + _theme_concentration(candidates),
+        "",
+        "市场判断：",
+        "当前邮件未接入四指数和全市场涨跌停统计；低风险买入只以 A 类为前提，B/C1 先按观察处理。",
+        "",
+        "## 4. 候选数量汇总",
+        "",
+        "| 类型 | 数量 | 交易含义 |",
+        "|---|---:|---|",
+        f"| A 周线确认 | {a_count} | 可交易观察 |",
+        f"| B 日线预警 | {b_count} | 观察，等周线确认 |",
+        f"| C1 强趋势右尾 | {c1_count} | 右尾观察，不是低风险买点 |",
+        f"| C2 不追 | {c2_count} | 不追，等重新整理 |",
+        f"| D 排除/突破不足 | {d_count} | 排除 |",
+        f"| 成长观察 | {len(growth_items)} | 只跟踪，不买 |",
+        "",
+        "## 5. 题材/主线分布",
         "",
     ]
+    lines.extend(_theme_distribution_table(candidates))
+
     if not candidates:
-        lines.append("今日没有符合突破条件的候选。")
+        lines.extend(
+            [
+                "",
+                "今日没有符合突破条件的候选。",
+                "",
+                "## 6. A类：周线确认突破池",
+                "",
+                "今日 A 类数量：0",
+                "",
+                "结论：",
+                "没有可直接进入低风险突破买入观察的标的。",
+                "",
+                "## 11. 今日交易计划",
+                "",
+                "低风险突破仓：",
+                "- 今日新增：0",
+                "- 原因：无 A 类周线确认",
+                "",
+                "明确不做：",
+                "- 不买 D",
+                "- 不买高开超过5%的突破票",
+                "- 不买长上影回落票",
+            ]
+        )
         return "\n".join(lines) + "\n"
+
+    a_items = _pool_display_items("A", candidates, pools)
+    b_items = _pool_display_items("B", candidates, pools)[:10]
+    c1_items = _pool_display_items("C1", candidates, pools)[:5]
+    c2_d_items = (_pool_display_items("C2", candidates, pools) + _pool_display_items("D", candidates, pools))[:10]
 
     lines.extend(
         [
-            "|排名|类型|代码|名称|标签|收盘|市值(亿)|压力区|突破%|量能比|量趋势|触达|跨度周|ATR%|技术分|成长分|营收同比%|净利同比%|ROE%|买入区|交易止损|结论|",
-            "|---:|---|---|---|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---|",
+            "## 6. A类：周线确认突破池",
+            "",
+            f"今日 A 类数量：{a_count}",
+            "",
         ]
     )
-    for idx, item in enumerate(candidates, start=1):
+    if a_items:
+        lines.extend(_core_candidate_table(a_items, limit=None))
+    else:
+        lines.extend(
+            [
+                "结论：",
+                "没有可直接进入低风险突破买入观察的标的。",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## 7. B类：日线预警池",
+            "",
+        ]
+    )
+    if b_items:
+        lines.extend(_core_candidate_table(b_items, limit=10))
+    else:
+        lines.append("今日 B 类数量：0")
+    lines.extend(
+        [
+            "",
+            "B类复核结论：",
+            "- 只观察，不直接重仓。",
+            "- 若次日高开超过3%，不追。",
+            "- 若回踩压力区上沿不破，继续观察。",
+            "- 若跌回压力区内，信号取消。",
+            "",
+            "## 8. C1类：强趋势右尾观察池",
+            "",
+        ]
+    )
+    if c1_items:
+        lines.extend(_c1_candidate_table(c1_items))
+    else:
+        lines.append("今日 C1 类数量：0")
+    lines.extend(
+        [
+            "",
+            "C1复核结论：",
+            "- C1 不等于低风险买点。",
+            "- 只能作为右尾长持观察池。",
+            "- 若没有题材共振，降级为 C2。",
+            "",
+            "## 9. C2 / D 排除摘要",
+            "",
+            "主要排除原因统计：",
+            "",
+        ]
+    )
+    lines.extend(_exclusion_reason_table(c2_d_items))
+    lines.extend(
+        [
+            "",
+            "重点不追标的：",
+        ]
+    )
+    if c2_d_items:
+        lines.extend(_no_chase_table(c2_d_items[:5]))
+    else:
+        lines.append("无重点不追标的。")
+    lines.extend(
+        [
+            "",
+            "## 10. 成长观察池",
+            "",
+            "说明：当前尚未启用独立成长观察池；下表为本次突破候选中成长分靠前的观察对象，不是买入清单。",
+            "",
+        ]
+    )
+    if growth_items:
+        lines.extend(_growth_table(growth_items))
+    else:
+        lines.append("暂无成长分可用的观察对象。")
+    lines.extend(
+        [
+            "",
+            "成长观察结论：",
+            "这些不是买入清单，只是后续重点跟踪池。",
+            "",
+            "## 11. 今日交易计划",
+            "",
+            "低风险突破仓：",
+            f"- 今日新增：{a_count}",
+            f"- 原因：{'存在 A 类周线确认，进入人工复核' if a_count else '无 A 类周线确认'}",
+            "",
+            "右尾长持仓：",
+            f"- 今日新增：{'0 或 1' if c1_count else '0'}",
+            "- 仅当 C1 所属题材共振强，且次日不高开超过3%",
+            "",
+            "观察列表：",
+        ]
+    )
+    for theme in _top_theme_names(candidates, limit=3):
+        lines.append(f"- {theme}：继续观察")
+    if not _top_theme_names(candidates, limit=3):
+        lines.append("- 暂无集中题材：弱观察")
+    lines.extend(
+        [
+            "",
+            "明确不做：",
+            "- 不追 C2",
+            "- 不买 D",
+            "- 不买高开超过5%的突破票",
+            "- 不买长上影回落票",
+            "",
+            "## 12. 输出说明",
+            "",
+            "本邮件不附附件；CSV、Excel、HTML 仪表盘和 AI 分析仍会生成并发布到网站端。",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def build_daily_email_subject(result: ScanResult) -> str:
+    verdict = _data_verdict(result.scanned_count, result.failed_count)
+    action = _final_action(result.scanned_count, result.failed_count, result.pool_counts)
+    return (
+        f"[Breakout][Daily] {result.latest_trade_date} {verdict} "
+        f"scan={result.scanned_count} fail={result.failed_count} "
+        f"A={result.pool_counts.get('A', 0)} B={result.pool_counts.get('B', 0)} "
+        f"C1={result.pool_counts.get('C1', 0)} action={action}"
+    )
+
+
+def _data_verdict(scanned_count: int, failed_count: int) -> str:
+    if scanned_count <= 0:
+        return "DATA_FAILED"
+    if failed_count >= scanned_count or failed_count > max(50, int(scanned_count * 0.2)):
+        return "DATA_FAILED"
+    if failed_count > 0:
+        return "WARN"
+    return "OK"
+
+
+def _final_action(scanned_count: int, failed_count: int, pool_counts: dict[str, int]) -> str:
+    if _data_verdict(scanned_count, failed_count) == "DATA_FAILED":
+        return "DATA_FAILED"
+    if pool_counts.get("A", 0) > 0:
+        return "LOW_RISK_BUY"
+    if pool_counts.get("B", 0) > 0 or pool_counts.get("C1", 0) > 0:
+        return "WATCH_ONLY"
+    return "NO_BUY"
+
+
+def _final_action_reason(final_action: str) -> str:
+    if final_action == "LOW_RISK_BUY":
+        return "存在 A 类周线确认，但仍需人工复核题材、财务和次日开盘。"
+    if final_action == "WATCH_ONLY":
+        return "无 A 类低风险买点，B/C1 仅观察。"
+    if final_action == "DATA_FAILED":
+        return "数据不完整，不输出交易判断。"
+    return "无有效低风险突破信号。"
+
+
+def _final_action_sentence(final_action: str) -> str:
+    if final_action == "LOW_RISK_BUY":
+        return "今天有 A 类标的，可进入低风险突破买入复核，但不自动交易。"
+    if final_action == "WATCH_ONLY":
+        return "今天只观察，不新增突破仓。"
+    if final_action == "DATA_FAILED":
+        return "今日扫描数据不完整，不做交易判断。"
+    return "今天没有交易价值，不新增突破仓。"
+
+
+def _pool_display_items(
+    signal_type: str,
+    candidates: list[Candidate],
+    pools: dict[str, list[Candidate]] | None,
+) -> list[Candidate]:
+    enriched = [item for item in candidates if item.signal_type == signal_type]
+    if enriched:
+        return enriched
+    return list((pools or {}).get(signal_type, []))
+
+
+def _primary_tag(item: Candidate) -> str:
+    return item.tags[0] if item.tags else "未标记"
+
+
+def _top_theme_names(candidates: list[Candidate], limit: int = 3) -> list[str]:
+    counts = Counter(_primary_tag(item) for item in candidates if item.signal_type != "D")
+    return [theme for theme, _ in counts.most_common(limit) if theme != "未标记"]
+
+
+def _theme_concentration(candidates: list[Candidate]) -> str:
+    themes = [_primary_tag(item) for item in candidates if item.signal_type in {"A", "B", "C1"}]
+    if not themes:
+        return "低"
+    top_count = Counter(themes).most_common(1)[0][1]
+    ratio = top_count / len(themes)
+    if ratio >= 0.35:
+        return "高"
+    if ratio >= 0.2:
+        return "中"
+    return "低"
+
+
+def _theme_distribution_table(candidates: list[Candidate]) -> list[str]:
+    lines = [
+        "| 题材 | A | B | C1 | C2 | 合计 | 判断 |",
+        "|---|---:|---:|---:|---:|---:|---|",
+    ]
+    if not candidates:
+        lines.append("| - | 0 | 0 | 0 | 0 | 0 | 无候选 |")
+        return lines + ["", "今日主线判断：无候选，无法判断题材共振。"]
+
+    grouped: dict[str, Counter[str]] = {}
+    for item in candidates:
+        if item.signal_type == "D":
+            continue
+        theme = _primary_tag(item)
+        grouped.setdefault(theme, Counter())[item.signal_type] += 1
+
+    rows: list[tuple[str, Counter[str], int]] = []
+    for theme, counts in grouped.items():
+        total = sum(counts.get(key, 0) for key in ("A", "B", "C1", "C2"))
+        rows.append((theme, counts, total))
+    rows.sort(key=lambda row: (-row[2], -row[1].get("A", 0), -row[1].get("B", 0), row[0]))
+
+    for theme, counts, total in rows[:8]:
         lines.append(
-            "|{rank}|{signal}|{code}|{name}|{tags}|{close:.2f}|{mv}|{zone_low:.2f}-{zone_upper:.2f}|{breakout:.2f}|"
-            "{vr:.2f}|{vt:.2f}|{touches}|{span}|{atr:.1f}|{score:.1f}|{growth}|{revenue}|{profit}|{roe}|"
-            "{buy_low:.2f}-{buy_high:.2f}|{stop:.2f}|{action}|".format(
+            "| {theme} | {a} | {b} | {c1} | {c2} | {total} | {judgement} |".format(
+                theme=_md(theme),
+                a=counts.get("A", 0),
+                b=counts.get("B", 0),
+                c1=counts.get("C1", 0),
+                c2=counts.get("C2", 0),
+                total=total,
+                judgement=_theme_judgement(total, counts.get("A", 0), counts.get("C1", 0)),
+            )
+        )
+
+    top_themes = _top_theme_names(candidates, limit=3)
+    if top_themes:
+        lines.extend(["", f"今日主线判断：{', '.join(top_themes)} 更值得观察；孤立突破不追。"])
+    else:
+        lines.extend(["", "今日主线判断：候选较分散，孤立突破不追。"])
+    return lines
+
+
+def _theme_judgement(total: int, a_count: int, c1_count: int) -> str:
+    if a_count > 0 and total >= 2:
+        return "有A类共振，重点复核"
+    if total >= 4:
+        return "有共振，重点观察"
+    if c1_count > 0:
+        return "强趋势但波动偏高"
+    if total >= 2:
+        return "扩散线"
+    return "孤立信号"
+
+
+def _core_candidate_table(items: list[Candidate], limit: int | None) -> list[str]:
+    shown = items if limit is None else items[:limit]
+    lines = [
+        "| 排名 | 股票 | 代码 | 题材 | 收盘 | 压力区上沿 | 突破% | 成交额倍数 | 量能来源 | 触碰次数 | 跨度周 | 技术分 | 成长分 | 买入区 | 交易止损 | 结论 |",
+        "|---:|---|---|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---|---:|---|",
+    ]
+    for idx, item in enumerate(shown, start=1):
+        lines.append(
+            "|{rank}|{name}|{code}|{theme}|{close:.2f}|{zone_upper:.2f}|{breakout:.2f}|{activity:.2f}|{source}|"
+            "{touches}|{span}|{score:.1f}|{growth}|{buy_zone}|{stop:.2f}|{action}|".format(
                 rank=idx,
-                signal=item.signal_type,
                 code=item.code,
-                name=item.name,
-                tags="、".join(item.tags) if item.tags else "-",
+                name=_md(item.name),
+                theme=_md(_primary_tag(item)),
                 close=item.latest_close,
-                mv=f"{item.circ_mv:.1f}" if item.circ_mv > 0 else "-",
-                zone_low=item.zone_low or item.resistance,
                 zone_upper=item.zone_upper or item.resistance,
                 breakout=item.breakout_pct * 100,
-                vr=item.volume_ratio,
-                vt=item.volume_trend,
+                activity=item.activity_ratio or item.volume_ratio,
+                source=item.activity_source or "-",
                 touches=item.resistance_touches,
                 span=item.span_weeks,
-                atr=item.atr_pct * 100,
                 score=item.score,
-                growth=f"{item.growth_score:.1f}" if item.growth_score > 0 else "-",
+                growth=_fmt_score(item.growth_score),
+                buy_zone=f"{item.buy_zone_low:.2f}-{item.buy_zone_high:.2f}",
+                stop=item.trade_stop_loss or item.stop_loss,
+                action=_md(item.trade_action or item.position_hint or item.signal_reason),
+            )
+        )
+    return lines
+
+
+def _c1_candidate_table(items: list[Candidate]) -> list[str]:
+    lines = [
+        "| 排名 | 股票 | 代码 | 题材 | 收盘 | 压力区上沿 | 突破% | 成交额倍数 | 近5日涨幅 | 技术分 | 风险 | 结论 |",
+        "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---|---|",
+    ]
+    for idx, item in enumerate(items, start=1):
+        lines.append(
+            "|{rank}|{name}|{code}|{theme}|{close:.2f}|{zone_upper:.2f}|{breakout:.2f}|{activity:.2f}|-|{score:.1f}|{risk}|{action}|".format(
+                rank=idx,
+                name=_md(item.name),
+                code=item.code,
+                theme=_md(_primary_tag(item)),
+                close=item.latest_close,
+                zone_upper=item.zone_upper or item.resistance,
+                breakout=item.breakout_pct * 100,
+                activity=item.activity_ratio or item.volume_ratio,
+                score=item.score,
+                risk=_md("已远离低风险买点" if item.breakout_pct >= 0.08 else "强趋势但追高风险"),
+                action=_md(item.trade_action or "右尾观察，不低吸"),
+            )
+        )
+    return lines
+
+
+def _exclusion_reason_table(items: list[Candidate]) -> list[str]:
+    counts = Counter(_exclusion_reason(item) for item in items)
+    if not counts:
+        counts["无展示样本"] = 0
+    lines = ["| 原因 | 数量 |", "|---|---:|"]
+    for reason, count in counts.most_common():
+        lines.append(f"| {_md(reason)} | {count} |")
+    return lines
+
+
+def _no_chase_table(items: list[Candidate]) -> list[str]:
+    lines = ["| 股票 | 代码 | 原因 |", "|---|---|---|"]
+    for item in items:
+        lines.append(f"| {_md(item.name)} | {item.code} | {_md(_exclusion_reason(item))} |")
+    return lines
+
+
+def _growth_watch_items(candidates: list[Candidate], limit: int = 10) -> list[Candidate]:
+    return sorted(
+        [item for item in candidates if item.growth_score > 0],
+        key=lambda item: (-item.growth_score, item.signal_type, item.code),
+    )[:limit]
+
+
+def _growth_table(items: list[Candidate]) -> list[str]:
+    lines = [
+        "| 排名 | 股票 | 代码 | 题材 | 成长分 | 营收同比% | 净利同比% | ROE% | 距压力区% | 观察触发条件 |",
+        "|---:|---|---|---|---:|---:|---:|---:|---:|---|",
+    ]
+    for idx, item in enumerate(items, start=1):
+        lines.append(
+            "|{rank}|{name}|{code}|{theme}|{growth}|{revenue}|{profit}|{roe}|{distance:.2f}|{trigger}|".format(
+                rank=idx,
+                name=_md(item.name),
+                code=item.code,
+                theme=_md(_primary_tag(item)),
+                growth=_fmt_score(item.growth_score),
                 revenue=_fmt_optional(item.revenue_yoy),
                 profit=_fmt_optional(item.profit_yoy),
                 roe=_fmt_optional(item.roe),
-                buy_low=item.buy_zone_low,
-                buy_high=item.buy_zone_high,
-                stop=item.trade_stop_loss or item.stop_loss,
-                action=item.trade_action or item.position_hint,
+                distance=item.breakout_pct * 100,
+                trigger=_md("周线确认 + 成交额倍数>1.8" if item.signal_type != "A" else "回踩不破压力区上沿 + 缩量企稳"),
             )
         )
-    lines.append("")
-    return "\n".join(lines)
+    return lines
+
+
+def _exclusion_reason(item: Candidate) -> str:
+    text = " ".join(part for part in (item.signal_reason, item.trade_action, item.position_hint) if part)
+    if item.breakout_pct < 0.02 or "突破不足" in text:
+        return "突破不足2%"
+    if item.breakout_pct > 0.12 or "过远" in text or "远离" in text or "不追" in text:
+        return "距离压力区过远"
+    if (item.activity_ratio or item.volume_ratio) < 1.8 or "量能" in text or "成交" in text:
+        return "成交额倍数不足1.8"
+    if "基本面" in text or "ROE" in text or "净利" in text or "营收" in text:
+        return "基本面风险"
+    if not item.tags:
+        return "题材孤立"
+    return "交易纪律不满足"
+
+
+def _fmt_score(value: float) -> str:
+    return f"{value:.1f}" if value and value > 0 else "-"
+
+
+def _md(value: object) -> str:
+    return str(value if value is not None else "-").replace("|", "/").replace("\n", " ").strip() or "-"
 
 
 def _fetch_tags_for_candidates(
