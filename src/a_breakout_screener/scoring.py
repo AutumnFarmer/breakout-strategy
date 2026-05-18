@@ -74,6 +74,10 @@ def evaluate_stock(
     weekly_span_mean = _weekly_span_mean(weekly, params.consolidation_weeks, latest["date"]) if params.consolidation_weeks > 0 else 0.0
     atr_pct = _calc_atr(daily)
     recent_low = float(daily["low"].tail(20).min())
+    recent_5d_pct = _recent_return_pct(daily, 5)
+    recent_10d_pct = _recent_return_pct(daily, 10)
+    consecutive_limit_up_days = _consecutive_limit_up_days(daily, code, name)
+    long_upper_shadow = _has_long_upper_shadow(latest)
 
     return assess_candidate(
         code=code,
@@ -97,6 +101,10 @@ def evaluate_stock(
         monthly_span_pct=monthly_span_pct,
         weekly_span_mean=weekly_span_mean,
         atr_pct=atr_pct,
+        recent_5d_pct=recent_5d_pct,
+        recent_10d_pct=recent_10d_pct,
+        consecutive_limit_up_days=consecutive_limit_up_days,
+        long_upper_shadow=long_upper_shadow,
         recent_low=recent_low,
         first_resistance_date=pressure_zone.first_touch_date,
         last_resistance_date=pressure_zone.last_touch_date,
@@ -135,6 +143,10 @@ def assess_candidate(
     zone_upper: float | None = None,
     span_weeks: int = 0,
     recent_low: float = 0.0,
+    recent_5d_pct: float = 0.0,
+    recent_10d_pct: float = 0.0,
+    consecutive_limit_up_days: int = 0,
+    long_upper_shadow: bool = False,
     is_week_confirmed: bool = False,
     activity_source: str = "",
 ) -> Candidate | None:
@@ -220,6 +232,10 @@ def assess_candidate(
         ma10=ma10,
         ma20=ma20,
         atr_pct=atr_pct,
+        recent_5d_pct=recent_5d_pct,
+        recent_10d_pct=recent_10d_pct,
+        consecutive_limit_up_days=consecutive_limit_up_days,
+        long_upper_shadow=long_upper_shadow,
         score=score,
         first_resistance_date=first_resistance_date,
         last_resistance_date=last_resistance_date,
@@ -532,6 +548,64 @@ def _calc_atr(daily: pd.DataFrame, period: int = 14) -> float:
     if latest_close <= 0:
         return 0.0
     return atr / latest_close
+
+
+def _recent_return_pct(daily: pd.DataFrame, days: int) -> float:
+    if len(daily) <= days:
+        return 0.0
+    closes = pd.to_numeric(daily["close"], errors="coerce").reset_index(drop=True)
+    latest = float(closes.iloc[-1])
+    base = float(closes.iloc[-days - 1])
+    if base <= 0 or not np.isfinite(base) or not np.isfinite(latest):
+        return 0.0
+    return latest / base - 1
+
+
+def _consecutive_limit_up_days(daily: pd.DataFrame, code: str, name: str) -> int:
+    if len(daily) < 2:
+        return 0
+    threshold = max(0.0, _limit_up_threshold_pct(code, name) - 0.005)
+    closes = pd.to_numeric(daily["close"], errors="coerce").reset_index(drop=True)
+    highs = pd.to_numeric(daily["high"], errors="coerce").reset_index(drop=True)
+    count = 0
+    for idx in range(len(closes) - 1, 0, -1):
+        prev_close = float(closes.iloc[idx - 1])
+        close = float(closes.iloc[idx])
+        high = float(highs.iloc[idx])
+        if prev_close <= 0 or not all(np.isfinite(value) for value in (prev_close, close, high)):
+            break
+        daily_ret = close / prev_close - 1
+        closed_near_high = high > 0 and close >= high * 0.998
+        if daily_ret >= threshold and closed_near_high:
+            count += 1
+            continue
+        break
+    return count
+
+
+def _limit_up_threshold_pct(code: str, name: str) -> float:
+    normalized_name = name.upper()
+    digits = "".join(ch for ch in code if ch.isdigit()).zfill(6)
+    if "ST" in normalized_name:
+        return 0.05
+    if digits.startswith(("300", "301", "688")):
+        return 0.20
+    if digits.startswith(("8", "4")):
+        return 0.30
+    return 0.10
+
+
+def _has_long_upper_shadow(row: pd.Series) -> bool:
+    high = float(row["high"])
+    low = float(row["low"])
+    open_ = float(row["open"])
+    close = float(row["close"])
+    candle_range = high - low
+    if candle_range <= 0:
+        return False
+    upper_shadow = high - max(open_, close)
+    body = abs(close - open_)
+    return upper_shadow / candle_range >= 0.35 and upper_shadow >= body
 
 
 def _monthly_span_pct(daily: pd.DataFrame, months: int = 12) -> float:

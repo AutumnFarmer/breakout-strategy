@@ -27,6 +27,10 @@ class Candidate:
     ma10: float = 0.0
     ma20: float = 0.0
     atr_pct: float = 0.0
+    recent_5d_pct: float = 0.0
+    recent_10d_pct: float = 0.0
+    consecutive_limit_up_days: int = 0
+    long_upper_shadow: bool = False
     score: float = 0.0
     first_resistance_date: date | None = None
     last_resistance_date: date | None = None
@@ -72,6 +76,10 @@ class Candidate:
             "压力跨度周": self.span_weeks,
             "月线跨度%": round(self.monthly_span_pct * 100, 2),
             "ATR%": round(self.atr_pct * 100, 2),
+            "近5日涨幅%": round(self.recent_5d_pct * 100, 2),
+            "近10日涨幅%": round(self.recent_10d_pct * 100, 2),
+            "连续涨停天数": self.consecutive_limit_up_days,
+            "是否长上影": "是" if self.long_upper_shadow else "否",
             "MA10": round(self.ma10, 2),
             "MA20": round(self.ma20, 2),
             "得分": round(self.score, 2),

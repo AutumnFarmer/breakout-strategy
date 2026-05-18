@@ -236,9 +236,9 @@ def write_outputs(
         pools=pools,
         run_time=run_time,
         full_scan=full_scan,
+        ai_analysis=ai_analysis,
     )
     if ai_analysis:
-        markdown += "\n## AI选股分析员\n\n" + ai_analysis.strip() + "\n"
         (output_dir / "ai_analysis.md").write_text(ai_analysis.strip() + "\n", encoding="utf-8")
     markdown_path.write_text(markdown, encoding="utf-8")
     html_path = write_html_dashboard(
@@ -263,6 +263,7 @@ def render_markdown_report(
     pools: dict[str, list[Candidate]] | None = None,
     run_time: str = "",
     full_scan: bool = True,
+    ai_analysis: str = "",
 ) -> str:
     pool_counts = pool_counts or {}
     all_candidate_count = sum(pool_counts.values()) if pool_counts else len(candidates)
@@ -303,6 +304,7 @@ def render_markdown_report(
         f"- B类日线预警数量：{b_count}",
         f"- C1强趋势数量：{c1_count}",
         "- 市场环境：未接入四指数周线环境判断，按个股信号保守处理",
+        "- 由于 Market regime = NOT_EVALUATED，本日报不输出 LOW_RISK_BUY_CONFIRMED，只输出 BUY_CHECK。",
         f"- 今日交易纪律：{_final_action_reason(final_action)}",
         "",
         "一句话结论：",
@@ -328,7 +330,7 @@ def render_markdown_report(
         "- 主线集中度：" + _theme_concentration(candidates),
         "",
         "市场判断：",
-        "当前邮件未接入四指数和全市场涨跌停统计；低风险买入只以 A 类为前提，B/C1 先按观察处理。",
+        "当前邮件未接入四指数和全市场涨跌停统计；A 类只能进入 BUY_CHECK，B/C1 先按观察处理。",
         "",
         "## 4. 候选数量汇总",
         "",
@@ -387,7 +389,7 @@ def render_markdown_report(
         ]
     )
     if a_items:
-        lines.extend(_core_candidate_table(a_items, limit=None))
+        lines.extend(_core_candidate_table(a_items, limit=None, include_trade_constraints=True))
     else:
         lines.extend(
             [
@@ -451,7 +453,11 @@ def render_markdown_report(
     lines.extend(
         [
             "",
-            "## 10. 成长观察池",
+            "## 10. AI 复核分析",
+            "",
+            ai_analysis.strip() if ai_analysis.strip() else "未启用或未生成 AI 复核分析。",
+            "",
+            "## 11. 成长观察池",
             "",
             "说明：当前尚未启用独立成长观察池；下表为本次突破候选中成长分靠前的观察对象，不是买入清单。",
             "",
@@ -467,11 +473,11 @@ def render_markdown_report(
             "成长观察结论：",
             "这些不是买入清单，只是后续重点跟踪池。",
             "",
-            "## 11. 今日交易计划",
+            "## 12. 今日交易计划",
             "",
             "低风险突破仓：",
             f"- 今日新增：{a_count}",
-            f"- 原因：{'存在 A 类周线确认，进入人工复核' if a_count else '无 A 类周线确认'}",
+            f"- 原因：{'存在 A 类周线确认，但市场环境未评估，只进入 BUY_CHECK' if a_count else '无 A 类周线确认'}",
             "",
             "右尾长持仓：",
             f"- 今日新增：{'0 或 1' if c1_count else '0'}",
@@ -493,9 +499,9 @@ def render_markdown_report(
             "- 不买高开超过5%的突破票",
             "- 不买长上影回落票",
             "",
-            "## 12. 输出说明",
+            "## 13. 输出说明",
             "",
-            "本邮件不附附件；CSV、Excel、HTML 仪表盘和 AI 分析仍会生成并发布到网站端。",
+            "正文用于第一轮复核；关键 CSV、HTML 仪表盘和 AI 分析会作为附件随邮件发送，并继续发布到网站端。",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -522,19 +528,34 @@ def _data_verdict(scanned_count: int, failed_count: int) -> str:
     return "OK"
 
 
-def _final_action(scanned_count: int, failed_count: int, pool_counts: dict[str, int]) -> str:
+def _final_action(
+    scanned_count: int,
+    failed_count: int,
+    pool_counts: dict[str, int],
+    market_regime: str = "NOT_EVALUATED",
+) -> str:
     if _data_verdict(scanned_count, failed_count) == "DATA_FAILED":
         return "DATA_FAILED"
     if pool_counts.get("A", 0) > 0:
-        return "LOW_RISK_BUY"
-    if pool_counts.get("B", 0) > 0 or pool_counts.get("C1", 0) > 0:
+        if market_regime == "STRONG_ATTACK":
+            return "LOW_RISK_BUY_CONFIRMED"
+        if market_regime == "DEFENSIVE":
+            return "WATCH_ONLY"
+        return "BUY_CHECK"
+    if pool_counts.get("B", 0) > 0:
         return "WATCH_ONLY"
+    if pool_counts.get("C1", 0) > 0:
+        return "RIGHT_TAIL_WATCH"
     return "NO_BUY"
 
 
 def _final_action_reason(final_action: str) -> str:
-    if final_action == "LOW_RISK_BUY":
-        return "存在 A 类周线确认，但仍需人工复核题材、财务和次日开盘。"
+    if final_action == "LOW_RISK_BUY_CONFIRMED":
+        return "A 类周线确认且市场环境支持，仍需复核题材、财务和次日开盘。"
+    if final_action == "BUY_CHECK":
+        return "存在 A 类周线确认，但市场环境未确认或偏谨慎，只进入人工买入复核。"
+    if final_action == "RIGHT_TAIL_WATCH":
+        return "只有 C1 右尾强趋势信号，不属于低风险买点。"
     if final_action == "WATCH_ONLY":
         return "无 A 类低风险买点，B/C1 仅观察。"
     if final_action == "DATA_FAILED":
@@ -543,8 +564,12 @@ def _final_action_reason(final_action: str) -> str:
 
 
 def _final_action_sentence(final_action: str) -> str:
-    if final_action == "LOW_RISK_BUY":
-        return "今天有 A 类标的，可进入低风险突破买入复核，但不自动交易。"
+    if final_action == "LOW_RISK_BUY_CONFIRMED":
+        return "今天有 A 类标的且市场环境支持，可进入低风险突破买入复核，但不自动交易。"
+    if final_action == "BUY_CHECK":
+        return "今天有 A 类标的，进入人工复核；市场环境未确认前不自动视为低风险买入确认。"
+    if final_action == "RIGHT_TAIL_WATCH":
+        return "今天只有右尾强趋势观察信号，不新增低风险突破仓。"
     if final_action == "WATCH_ONLY":
         return "今天只观察，不新增突破仓。"
     if final_action == "DATA_FAILED":
@@ -640,32 +665,74 @@ def _theme_judgement(total: int, a_count: int, c1_count: int) -> str:
     return "孤立信号"
 
 
-def _core_candidate_table(items: list[Candidate], limit: int | None) -> list[str]:
+def _buy_zone_status(item: Candidate) -> str:
+    if item.buy_zone_low <= 0 or item.buy_zone_high <= 0:
+        return "UNKNOWN"
+    if item.buy_zone_low <= item.latest_close <= item.buy_zone_high:
+        return "YES"
+    if item.latest_close > item.buy_zone_high:
+        return "ABOVE"
+    return "BELOW"
+
+
+def _next_day_trade_action(item: Candidate) -> str:
+    status = _buy_zone_status(item)
+    if status == "YES":
+        return "低风险复核；次日不高开才考虑"
+    if status == "ABOVE":
+        return "等回踩，不追"
+    if status == "BELOW":
+        return "等重新站回买入区"
+    return "缺少买入区数据，人工复核"
+
+
+def _core_candidate_table(
+    items: list[Candidate],
+    limit: int | None,
+    include_trade_constraints: bool = False,
+) -> list[str]:
     shown = items if limit is None else items[:limit]
-    lines = [
-        "| 排名 | 股票 | 代码 | 题材 | 收盘 | 压力区上沿 | 突破% | 成交额倍数 | 量能来源 | 触碰次数 | 跨度周 | 技术分 | 成长分 | 买入区 | 交易止损 | 结论 |",
-        "|---:|---|---|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---|---:|---|",
-    ]
+    header = (
+        "| 排名 | 股票 | 代码 | 题材 | 收盘 | 压力区上沿 | 突破% | 成交额倍数 | 量能来源 | "
+        "触碰次数 | 跨度周 | 技术分 | 成长分 | 买入区 | 交易止损 |"
+    )
+    align = "|---:|---|---|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---|---:|"
+    if include_trade_constraints:
+        header += " 是否在买入区 | 次日高开限制 | 建议动作 |"
+        align += "---|---|---|"
+    header += " 结论 |"
+    align += "---|"
+    lines = [header, align]
     for idx, item in enumerate(shown, start=1):
+        cells = [
+            str(idx),
+            _md(item.name),
+            item.code,
+            _md(_primary_tag(item)),
+            f"{item.latest_close:.2f}",
+            f"{(item.zone_upper or item.resistance):.2f}",
+            f"{item.breakout_pct * 100:.2f}",
+            f"{(item.activity_ratio or item.volume_ratio):.2f}",
+            item.activity_source or "-",
+            str(item.resistance_touches),
+            str(item.span_weeks),
+            f"{item.score:.1f}",
+            _fmt_score(item.growth_score),
+            f"{item.buy_zone_low:.2f}-{item.buy_zone_high:.2f}",
+            f"{(item.trade_stop_loss or item.stop_loss):.2f}",
+        ]
+        if include_trade_constraints:
+            cells.extend(
+                [
+                    _buy_zone_status(item),
+                    "高开>3%不追，>5%放弃；跌回压力区上沿取消",
+                    _next_day_trade_action(item),
+                ]
+            )
+        cells.append(_md(item.trade_action or item.position_hint or item.signal_reason))
         lines.append(
-            "|{rank}|{name}|{code}|{theme}|{close:.2f}|{zone_upper:.2f}|{breakout:.2f}|{activity:.2f}|{source}|"
-            "{touches}|{span}|{score:.1f}|{growth}|{buy_zone}|{stop:.2f}|{action}|".format(
-                rank=idx,
-                code=item.code,
-                name=_md(item.name),
-                theme=_md(_primary_tag(item)),
-                close=item.latest_close,
-                zone_upper=item.zone_upper or item.resistance,
-                breakout=item.breakout_pct * 100,
-                activity=item.activity_ratio or item.volume_ratio,
-                source=item.activity_source or "-",
-                touches=item.resistance_touches,
-                span=item.span_weeks,
-                score=item.score,
-                growth=_fmt_score(item.growth_score),
-                buy_zone=f"{item.buy_zone_low:.2f}-{item.buy_zone_high:.2f}",
-                stop=item.trade_stop_loss or item.stop_loss,
-                action=_md(item.trade_action or item.position_hint or item.signal_reason),
+            "|{cells}|".format(
+                cells="|".join(_md(cell) for cell in cells),
             )
         )
     return lines
@@ -673,12 +740,13 @@ def _core_candidate_table(items: list[Candidate], limit: int | None) -> list[str
 
 def _c1_candidate_table(items: list[Candidate]) -> list[str]:
     lines = [
-        "| 排名 | 股票 | 代码 | 题材 | 收盘 | 压力区上沿 | 突破% | 成交额倍数 | 近5日涨幅 | 技术分 | 风险 | 结论 |",
-        "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---|---|",
+        "| 排名 | 股票 | 代码 | 题材 | 收盘 | 压力区上沿 | 突破% | 成交额倍数 | 近5日涨幅% | 近10日涨幅% | 是否连续涨停 | 是否长上影 | 技术分 | 风险 | 结论 |",
+        "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---|---|---:|---|---|",
     ]
     for idx, item in enumerate(items, start=1):
         lines.append(
-            "|{rank}|{name}|{code}|{theme}|{close:.2f}|{zone_upper:.2f}|{breakout:.2f}|{activity:.2f}|-|{score:.1f}|{risk}|{action}|".format(
+            "|{rank}|{name}|{code}|{theme}|{close:.2f}|{zone_upper:.2f}|{breakout:.2f}|{activity:.2f}|"
+            "{ret5:.2f}|{ret10:.2f}|{limit_up}|{long_shadow}|{score:.1f}|{risk}|{action}|".format(
                 rank=idx,
                 name=_md(item.name),
                 code=item.code,
@@ -687,6 +755,10 @@ def _c1_candidate_table(items: list[Candidate]) -> list[str]:
                 zone_upper=item.zone_upper or item.resistance,
                 breakout=item.breakout_pct * 100,
                 activity=item.activity_ratio or item.volume_ratio,
+                ret5=item.recent_5d_pct * 100,
+                ret10=item.recent_10d_pct * 100,
+                limit_up="是" if item.consecutive_limit_up_days >= 2 else "否",
+                long_shadow="是" if item.long_upper_shadow else "否",
                 score=item.score,
                 risk=_md("已远离低风险买点" if item.breakout_pct >= 0.08 else "强趋势但追高风险"),
                 action=_md(item.trade_action or "右尾观察，不低吸"),

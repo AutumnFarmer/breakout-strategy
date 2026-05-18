@@ -9,7 +9,7 @@ from pathlib import Path
 from .config import AppConfig, load_config
 from .emailer import send_report, validate_email_transport
 from .backtest import run_backtest, run_first_signal_backtest, run_first_signal_executable_backtest
-from .screener import build_daily_email_subject, run_scan
+from .screener import ScanResult, build_daily_email_subject, run_scan
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -117,16 +117,39 @@ def _run(args: argparse.Namespace, config: AppConfig) -> int:
     if should_send:
         body = result.markdown_path.read_text(encoding="utf-8")
         subject = build_daily_email_subject(result)
+        attachments = _daily_scan_email_attachments(result)
         send_report(
             email_config=config.email,
             subject=subject,
             body=body,
-            attachments=[],
+            attachments=attachments,
         )
-        print("邮件发送完成")
+        print(f"邮件发送完成，附件 {len(attachments)} 个")
     else:
         print("邮件发送已跳过")
     return 0
+
+
+def _daily_scan_email_attachments(result: ScanResult) -> list[Path]:
+    wanted = [
+        result.csv_path,
+        result.output_dir / "breakout_A.csv",
+        result.output_dir / "breakout_B.csv",
+        result.output_dir / "breakout_C1.csv",
+        result.output_dir / "breakout_C2.csv",
+        result.output_dir / "breakout_D.csv",
+        result.output_dir / "growth_watchlist.csv",
+        result.html_path,
+        result.ai_analysis_path,
+    ]
+    attachments: list[Path] = []
+    for path in wanted:
+        if path is None:
+            continue
+        path = Path(path)
+        if path.exists() and path.is_file():
+            attachments.append(path)
+    return attachments
 
 
 def _backtest(args: argparse.Namespace, config: AppConfig) -> int:
