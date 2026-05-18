@@ -250,6 +250,7 @@ def write_outputs(
         latest_trade_date=latest_trade_date,
         ai_analysis=ai_analysis,
         pool_counts=pool_counts,
+        full_scan=full_scan,
     )
     return csv_path, xlsx_path, markdown_path, html_path
 

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections import Counter
+from datetime import datetime
 import json
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -18,6 +21,7 @@ def write_html_dashboard(
     latest_trade_date: str,
     ai_analysis: str = "",
     pool_counts: dict[str, int] | None = None,
+    full_scan: bool = True,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "breakout_dashboard.html"
@@ -29,6 +33,12 @@ def write_html_dashboard(
             "candidateCount": len(candidates),
             "allCandidateCount": sum((pool_counts or {}).values()) if pool_counts else len(candidates),
             "poolCounts": pool_counts or {},
+            "dataVerdict": _data_verdict(scanned_count, failed_count),
+            "finalAction": _final_action(scanned_count, failed_count, pool_counts or {}),
+            "marketRegime": "NOT_EVALUATED",
+            "runTime": datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S"),
+            "themeConcentration": _theme_concentration(candidates),
+            "fullScan": full_scan,
         },
         "candidates": [_candidate_payload(idx, item) for idx, item in enumerate(candidates, start=1)],
         "history": {
@@ -51,6 +61,7 @@ def _candidate_payload(rank: int, item: Candidate) -> dict[str, Any]:
         "name": item.name,
         "signalType": item.signal_type,
         "signalReason": item.signal_reason,
+        "primaryTag": _primary_tag(item),
         "latestClose": round(item.latest_close, 4),
         "resistance": round(item.resistance, 4),
         "zoneLow": round(item.zone_low or item.resistance, 4),
@@ -65,6 +76,10 @@ def _candidate_payload(rank: int, item: Candidate) -> dict[str, Any]:
         "touches": item.resistance_touches,
         "clusterSize": item.resistance_cluster_size,
         "atrPct": round(item.atr_pct * 100, 4),
+        "recent5dPct": round(item.recent_5d_pct * 100, 4),
+        "recent10dPct": round(item.recent_10d_pct * 100, 4),
+        "consecutiveLimitUpDays": item.consecutive_limit_up_days,
+        "longUpperShadow": item.long_upper_shadow,
         "circMv": round(item.circ_mv, 2) if item.circ_mv > 0 else 0,
         "score": round(item.score, 4),
         "growthScore": round(item.growth_score, 4) if item.growth_score > 0 else 0,
@@ -76,6 +91,8 @@ def _candidate_payload(rank: int, item: Candidate) -> dict[str, Any]:
         "debtToAssets": _rounded(item.debt_to_assets, 4),
         "buyLow": round(item.buy_zone_low, 4),
         "buyHigh": round(item.buy_zone_high, 4),
+        "buyZoneStatus": _buy_zone_status(item),
+        "nextDayTradeAction": _next_day_trade_action(item),
         "stopLoss": round(item.stop_loss, 4),
         "tradeStopLoss": round(item.trade_stop_loss or item.stop_loss, 4),
         "structureStopLoss": round(item.structure_stop_loss or item.stop_loss, 4),
@@ -109,6 +126,66 @@ def _rounded(value: Any, digits: int = 4) -> float | None:
     if pd.isna(value):
         return None
     return round(float(value), digits)
+
+
+def _data_verdict(scanned_count: int, failed_count: int) -> str:
+    if scanned_count <= 0:
+        return "DATA_FAILED"
+    if failed_count >= scanned_count or failed_count > max(50, int(scanned_count * 0.2)):
+        return "DATA_FAILED"
+    if failed_count > 0:
+        return "WARN"
+    return "OK"
+
+
+def _final_action(scanned_count: int, failed_count: int, pool_counts: dict[str, int]) -> str:
+    if _data_verdict(scanned_count, failed_count) == "DATA_FAILED":
+        return "DATA_FAILED"
+    if pool_counts.get("A", 0) > 0:
+        return "BUY_CHECK"
+    if pool_counts.get("B", 0) > 0:
+        return "WATCH_ONLY"
+    if pool_counts.get("C1", 0) > 0:
+        return "RIGHT_TAIL_WATCH"
+    return "NO_BUY"
+
+
+def _primary_tag(item: Candidate) -> str:
+    return item.tags[0] if item.tags else "未标记"
+
+
+def _theme_concentration(candidates: list[Candidate]) -> str:
+    themes = [_primary_tag(item) for item in candidates if item.signal_type in {"A", "B", "C1"}]
+    if not themes:
+        return "低"
+    top_count = Counter(themes).most_common(1)[0][1]
+    ratio = top_count / len(themes)
+    if ratio >= 0.35:
+        return "高"
+    if ratio >= 0.2:
+        return "中"
+    return "低"
+
+
+def _buy_zone_status(item: Candidate) -> str:
+    if item.buy_zone_low <= 0 or item.buy_zone_high <= 0:
+        return "UNKNOWN"
+    if item.buy_zone_low <= item.latest_close <= item.buy_zone_high:
+        return "YES"
+    if item.latest_close > item.buy_zone_high:
+        return "ABOVE"
+    return "BELOW"
+
+
+def _next_day_trade_action(item: Candidate) -> str:
+    status = _buy_zone_status(item)
+    if status == "YES":
+        return "低风险复核；次日不高开才考虑"
+    if status == "ABOVE":
+        return "等回踩，不追"
+    if status == "BELOW":
+        return "等重新站回买入区"
+    return "缺少买入区数据，人工复核"
 
 
 HTML_TEMPLATE = """<!doctype html>
@@ -172,6 +249,122 @@ HTML_TEMPLATE = """<!doctype html>
       margin-top: 3px;
       font-size: 18px;
       font-weight: 700;
+    }
+    .review-shell {
+      padding: 16px;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 14px;
+    }
+    .review-section {
+      padding: 16px;
+      box-shadow: none;
+    }
+    .review-section h2 {
+      margin: 0 0 10px;
+      font-size: 17px;
+      line-height: 1.35;
+      letter-spacing: 0;
+    }
+    .review-section h3 {
+      margin: 16px 0 8px;
+      font-size: 14px;
+      line-height: 1.35;
+      letter-spacing: 0;
+    }
+    .review-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .review-kv {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 9px 10px;
+      background: #fbfcfe;
+      min-width: 0;
+    }
+    .review-kv span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .review-kv strong {
+      display: block;
+      margin-top: 4px;
+      font-size: 14px;
+      overflow-wrap: anywhere;
+    }
+    .verdict-box {
+      border: 1px solid #d7e3f8;
+      border-radius: 8px;
+      padding: 12px;
+      background: #f7fbff;
+    }
+    .verdict-box strong {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--accent);
+      font-size: 16px;
+    }
+    .review-note {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .review-table-wrap {
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    .review-table-wrap table {
+      min-width: 760px;
+    }
+    .review-table-wrap th {
+      position: static;
+    }
+    .review-table-wrap td,
+    .review-table-wrap th {
+      padding: 8px 9px;
+    }
+    .review-table-wrap .left {
+      text-align: left;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 7px;
+      border-radius: 999px;
+      border: 1px solid #d7e3f8;
+      background: #f2f7ff;
+      color: #285b9f;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .pill.warn {
+      border-color: #f1d19b;
+      background: #fff7e8;
+      color: var(--warn);
+    }
+    .pool-block {
+      margin-top: 12px;
+    }
+    .ai-report-content {
+      color: #2c3440;
+      font-size: 13px;
+      line-height: 1.65;
+    }
+    .ai-report-content h3 {
+      margin: 12px 0 6px;
+    }
+    .ai-report-content p {
+      margin: 6px 0;
+    }
+    .ai-report-content ul {
+      margin: 6px 0 8px 18px;
+      padding: 0;
     }
     main {
       display: grid;
@@ -447,6 +640,8 @@ HTML_TEMPLATE = """<!doctype html>
     }
     @media (max-width: 980px) {
       header { padding: 18px 16px 12px; }
+      .review-shell { padding: 12px; }
+      .review-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       main {
         grid-template-columns: 1fr;
         padding: 12px;
@@ -467,9 +662,35 @@ HTML_TEMPLATE = """<!doctype html>
       <div class="stat"><span>全量候选</span><strong id="statAllCandidates"></strong></div>
       <div class="stat"><span>展示数量</span><strong id="statCandidates"></strong></div>
       <div class="stat"><span>A/B/C1/C2/D</span><strong id="statPools"></strong></div>
+      <div class="stat"><span>最终动作</span><strong id="statAction"></strong></div>
       <div class="stat"><span>数据失败</span><strong id="statFailed"></strong></div>
     </div>
   </header>
+  <div class="review-shell">
+    <section class="review-section">
+      <h2>日报复核总览</h2>
+      <div class="review-grid" id="reportDataStatus"></div>
+      <div class="verdict-box" id="reportFinalAction"></div>
+    </section>
+    <section class="review-section">
+      <h2>市场环境与候选数量</h2>
+      <div class="review-grid" id="reportMarketStatus"></div>
+      <div class="pool-block" id="reportPoolCounts"></div>
+    </section>
+    <section class="review-section">
+      <h2>题材/主线分布</h2>
+      <div id="reportThemeDistribution"></div>
+    </section>
+    <section class="review-section">
+      <h2>分池复核</h2>
+      <div id="reportPools"></div>
+    </section>
+    <section class="review-section">
+      <h2>AI 复核分析</h2>
+      <p class="review-note">AI选股分析员输出，仅用于辅助复核，不替代交易纪律。</p>
+      <div class="ai-report-content" id="aiReportContent"></div>
+    </section>
+  </div>
   <main>
     <section class="table-panel">
       <div class="section-head">
@@ -547,7 +768,7 @@ HTML_TEMPLATE = """<!doctype html>
         <div class="detail wide"><span>题材标签</span><strong id="tagDetail"></strong></div>
       </div>
       <div class="ai-panel" id="aiPanel">
-        <h2>AI选股分析员</h2>
+        <h2>AI 复核分析</h2>
         <div class="ai-content" id="aiContent"></div>
       </div>
     </section>
@@ -586,7 +807,301 @@ HTML_TEMPLATE = """<!doctype html>
     document.getElementById("statAllCandidates").textContent = DASHBOARD.meta.allCandidateCount;
     document.getElementById("statCandidates").textContent = DASHBOARD.meta.candidateCount;
     document.getElementById("statPools").textContent = ["A", "B", "C1", "C2", "D"].map(key => DASHBOARD.meta.poolCounts?.[key] || 0).join("/");
+    document.getElementById("statAction").textContent = DASHBOARD.meta.finalAction || "-";
     document.getElementById("statFailed").textContent = DASHBOARD.meta.failedCount;
+
+    function escapeHtml(value) {
+      return String(value ?? "-")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function kv(label, value) {
+      return `<div class="review-kv"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+    }
+
+    function poolCount(key) {
+      return DASHBOARD.meta.poolCounts?.[key] || 0;
+    }
+
+    function actionSentence(action) {
+      if (action === "BUY_CHECK") return "今日有 A 类标的，进入人工复核；市场环境未确认前不自动视为低风险买入确认。";
+      if (action === "LOW_RISK_BUY_CONFIRMED") return "今日有 A 类标的且市场环境支持，可进入低风险突破买入复核，但不自动交易。";
+      if (action === "RIGHT_TAIL_WATCH") return "今天只有右尾强趋势观察信号，不新增低风险突破仓。";
+      if (action === "WATCH_ONLY") return "今天只观察，不新增突破仓。";
+      if (action === "DATA_FAILED") return "今日扫描数据不完整，不做交易判断。";
+      return "今天没有交易价值，不新增突破仓。";
+    }
+
+    function poolItems(signalType, limit = null) {
+      const items = DASHBOARD.candidates.filter(item => item.signalType === signalType);
+      return limit ? items.slice(0, limit) : items;
+    }
+
+    function noChaseItems(limit = 5) {
+      return DASHBOARD.candidates
+        .filter(item => item.signalType === "C2" || item.signalType === "D")
+        .slice(0, limit);
+    }
+
+    function growthItems(limit = 10) {
+      return [...DASHBOARD.candidates]
+        .filter(item => item.growthScore > 0)
+        .sort((a, b) => (b.growthScore || 0) - (a.growthScore || 0))
+        .slice(0, limit);
+    }
+
+    function themeRows(limit = 8) {
+      const grouped = new Map();
+      DASHBOARD.candidates.forEach(item => {
+        if (item.signalType === "D") return;
+        const theme = item.primaryTag || "未标记";
+        const current = grouped.get(theme) || { A: 0, B: 0, C1: 0, C2: 0, total: 0 };
+        if (["A", "B", "C1", "C2"].includes(item.signalType)) {
+          current[item.signalType] += 1;
+          current.total += 1;
+        }
+        grouped.set(theme, current);
+      });
+      return Array.from(grouped.entries())
+        .sort((a, b) => b[1].total - a[1].total || b[1].A - a[1].A || b[1].B - a[1].B || a[0].localeCompare(b[0], "zh-CN"))
+        .slice(0, limit);
+    }
+
+    function themeJudgement(row) {
+      if (row.A > 0 && row.total >= 2) return "有A类共振，重点复核";
+      if (row.total >= 4) return "有共振，重点观察";
+      if (row.C1 > 0) return "强趋势但波动偏高";
+      if (row.total >= 2) return "扩散线";
+      return "孤立信号";
+    }
+
+    function exclusionReason(item) {
+      const text = [item.signalReason, item.tradeAction, item.hint].filter(Boolean).join(" ");
+      if ((item.breakoutPct || 0) < 2 || text.includes("突破不足")) return "突破不足2%";
+      if ((item.breakoutPct || 0) > 12 || text.includes("过远") || text.includes("远离") || text.includes("不追")) return "距离压力区过远";
+      if ((item.activityRatio || item.volumeRatio || 0) < 1.8 || text.includes("量能") || text.includes("成交")) return "成交额倍数不足1.8";
+      if (text.includes("基本面") || text.includes("ROE") || text.includes("净利") || text.includes("营收")) return "基本面风险";
+      if (!(item.tags || []).length) return "题材孤立";
+      return "交易纪律不满足";
+    }
+
+    function renderSimpleTable(headers, rows, emptyText) {
+      if (!rows.length) {
+        return `<p class="review-note">${escapeHtml(emptyText)}</p>`;
+      }
+      const head = headers.map(header => `<th class="${header.left ? "left" : ""}">${escapeHtml(header.label)}</th>`).join("");
+      const body = rows.map(row => {
+        return `<tr>${headers.map((header, idx) => `<td class="${header.left ? "left" : ""}">${row[idx]}</td>`).join("")}</tr>`;
+      }).join("");
+      return `<div class="review-table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+    }
+
+    function candidateLink(item) {
+      return `<button type="button" class="link-button" data-focus-code="${escapeHtml(item.code)}">${escapeHtml(item.name)}</button>`;
+    }
+
+    function coreRows(items, includeTradeConstraints = false) {
+      return items.map((item, index) => {
+        const row = [
+          escapeHtml(index + 1),
+          candidateLink(item),
+          escapeHtml(item.code),
+          escapeHtml(item.primaryTag || "未标记"),
+          escapeHtml(fmt(item.latestClose)),
+          escapeHtml(fmt(item.zoneUpper || item.resistance)),
+          escapeHtml(fmt(item.breakoutPct)),
+          escapeHtml(fmt(item.activityRatio || item.volumeRatio)),
+          escapeHtml(item.activitySource || "-"),
+          escapeHtml(item.touches || 0),
+          escapeHtml(item.spanWeeks || 0),
+          escapeHtml(fmt(item.score, 1)),
+          escapeHtml(item.growthScore > 0 ? fmt(item.growthScore, 1) : "-"),
+          escapeHtml(`${fmt(item.buyLow)}-${fmt(item.buyHigh)}`),
+          escapeHtml(fmt(item.tradeStopLoss || item.stopLoss)),
+        ];
+        if (includeTradeConstraints) {
+          row.push(
+            escapeHtml(item.buyZoneStatus || "UNKNOWN"),
+            escapeHtml("高开>3%不追，>5%放弃；跌回压力区上沿取消"),
+            escapeHtml(item.nextDayTradeAction || "-"),
+          );
+        }
+        row.push(escapeHtml(item.tradeAction || item.hint || item.signalReason || "-"));
+        return row;
+      });
+    }
+
+    function renderMarkdownLike(target, text) {
+      target.textContent = "";
+      if (!text) {
+        target.innerHTML = '<p class="review-note">未启用或未生成 AI 复核分析。</p>';
+        return;
+      }
+      let list = null;
+      text.split("\\n").forEach(rawLine => {
+        const line = rawLine.trim();
+        if (!line) {
+          list = null;
+          return;
+        }
+        if (line.startsWith("## ")) {
+          list = null;
+          const heading = document.createElement("h3");
+          heading.textContent = line.replace(/^##\\s+/, "");
+          target.appendChild(heading);
+          return;
+        }
+        if (line.startsWith("- ") || /^\\d+\\.\\s+/.test(line)) {
+          if (!list) {
+            list = document.createElement("ul");
+            target.appendChild(list);
+          }
+          const item = document.createElement("li");
+          item.textContent = line.replace(/^[-*]\\s+/, "").replace(/^\\d+\\.\\s+/, "");
+          list.appendChild(item);
+          return;
+        }
+        list = null;
+        const paragraph = document.createElement("p");
+        paragraph.textContent = line;
+        target.appendChild(paragraph);
+      });
+    }
+
+    function renderReportSections() {
+      const meta = DASHBOARD.meta || {};
+      document.getElementById("reportDataStatus").innerHTML = [
+        kv("Trade date", meta.latestTradeDate),
+        kv("Run time", meta.runTime || "-"),
+        kv("Data source", "Tushare + local cache"),
+        kv("Full scan", meta.fullScan ? "true" : "false"),
+        kv("Scanned stocks", meta.scannedCount),
+        kv("Failed stocks", meta.failedCount),
+        kv("Latest price date", meta.latestTradeDate),
+        kv("Data verdict", meta.dataVerdict || "-"),
+      ].join("");
+      document.getElementById("reportFinalAction").innerHTML = `
+        <strong>Final action: ${escapeHtml(meta.finalAction || "-")}</strong>
+        <p class="review-note">A=${poolCount("A")}，B=${poolCount("B")}，C1=${poolCount("C1")}；Market regime=${escapeHtml(meta.marketRegime || "NOT_EVALUATED")}。</p>
+        <p class="review-note">${escapeHtml(actionSentence(meta.finalAction))}</p>
+        <p class="review-note">由于 Market regime = NOT_EVALUATED，本日报不输出 LOW_RISK_BUY_CONFIRMED，只输出 BUY_CHECK。</p>
+      `;
+      document.getElementById("reportMarketStatus").innerHTML = [
+        kv("Market regime", meta.marketRegime || "NOT_EVALUATED"),
+        kv("主线集中度", meta.themeConcentration || "低"),
+        kv("四指数周线", "未接入"),
+        kv("成交/涨跌停", "未接入"),
+      ].join("");
+      document.getElementById("reportPoolCounts").innerHTML = renderSimpleTable(
+        [{ label: "类型", left: true }, { label: "数量" }, { label: "交易含义", left: true }],
+        [
+          ["A 周线确认", String(poolCount("A")), "可交易观察"],
+          ["B 日线预警", String(poolCount("B")), "观察，等周线确认"],
+          ["C1 强趋势右尾", String(poolCount("C1")), "右尾观察，不是低风险买点"],
+          ["C2 不追", String(poolCount("C2")), "不追，等重新整理"],
+          ["D 排除/突破不足", String(poolCount("D")), "排除"],
+          ["成长观察", String(growthItems(50).length), "只跟踪，不买"],
+        ].map(row => row.map(escapeHtml)),
+        "暂无候选数量。"
+      );
+      const themes = themeRows();
+      document.getElementById("reportThemeDistribution").innerHTML = renderSimpleTable(
+        [
+          { label: "题材", left: true },
+          { label: "A" },
+          { label: "B" },
+          { label: "C1" },
+          { label: "C2" },
+          { label: "合计" },
+          { label: "判断", left: true },
+        ],
+        themes.map(([theme, row]) => [
+          escapeHtml(theme),
+          escapeHtml(row.A),
+          escapeHtml(row.B),
+          escapeHtml(row.C1),
+          escapeHtml(row.C2),
+          escapeHtml(row.total),
+          escapeHtml(themeJudgement(row)),
+        ]),
+        "无候选，无法判断题材共振。"
+      );
+
+      const coreHeaders = [
+        { label: "排名" }, { label: "股票", left: true }, { label: "代码" }, { label: "题材", left: true },
+        { label: "收盘" }, { label: "压力上沿" }, { label: "突破%" }, { label: "成交额倍数" },
+        { label: "量能来源" }, { label: "触碰" }, { label: "跨度周" }, { label: "技术分" },
+        { label: "成长分" }, { label: "买入区" }, { label: "交易止损" },
+      ];
+      const actionHeaders = [
+        ...coreHeaders,
+        { label: "是否在买入区" },
+        { label: "次日高开限制", left: true },
+        { label: "建议动作", left: true },
+        { label: "结论", left: true },
+      ];
+      const observationHeaders = [...coreHeaders, { label: "结论", left: true }];
+      const c1Headers = [
+        { label: "排名" }, { label: "股票", left: true }, { label: "代码" }, { label: "题材", left: true },
+        { label: "收盘" }, { label: "压力上沿" }, { label: "突破%" }, { label: "成交额倍数" },
+        { label: "近5日涨幅%" }, { label: "近10日涨幅%" }, { label: "是否连续涨停" },
+        { label: "是否长上影" }, { label: "技术分" }, { label: "风险", left: true }, { label: "结论", left: true },
+      ];
+      const c1Rows = poolItems("C1", 5).map((item, index) => [
+        escapeHtml(index + 1),
+        candidateLink(item),
+        escapeHtml(item.code),
+        escapeHtml(item.primaryTag || "未标记"),
+        escapeHtml(fmt(item.latestClose)),
+        escapeHtml(fmt(item.zoneUpper || item.resistance)),
+        escapeHtml(fmt(item.breakoutPct)),
+        escapeHtml(fmt(item.activityRatio || item.volumeRatio)),
+        escapeHtml(fmt(item.recent5dPct)),
+        escapeHtml(fmt(item.recent10dPct)),
+        escapeHtml(item.consecutiveLimitUpDays >= 2 ? "是" : "否"),
+        escapeHtml(item.longUpperShadow ? "是" : "否"),
+        escapeHtml(fmt(item.score, 1)),
+        escapeHtml((item.breakoutPct || 0) >= 8 ? "已远离低风险买点" : "强趋势但追高风险"),
+        escapeHtml(item.tradeAction || "右尾观察，不低吸"),
+      ]);
+      const noChaseRows = noChaseItems(5).map(item => [candidateLink(item), escapeHtml(item.code), escapeHtml(exclusionReason(item))]);
+      const growthRows = growthItems(10).map((item, index) => [
+        escapeHtml(index + 1),
+        candidateLink(item),
+        escapeHtml(item.code),
+        escapeHtml(item.primaryTag || "未标记"),
+        escapeHtml(fmt(item.growthScore, 1)),
+        escapeHtml(fmtPct(item.revenueYoy)),
+        escapeHtml(fmtPct(item.profitYoy)),
+        escapeHtml(fmtPct(item.roe)),
+        escapeHtml(fmt(item.breakoutPct)),
+        escapeHtml(item.signalType === "A" ? "回踩不破压力区上沿 + 缩量企稳" : "周线确认 + 成交额倍数>1.8"),
+      ]);
+      document.getElementById("reportPools").innerHTML = [
+        `<div class="pool-block"><h3>A类：周线确认突破池 <span class="pill">${poolCount("A")}只</span></h3>${renderSimpleTable(actionHeaders, coreRows(poolItems("A"), true), "今日 A 类数量：0。没有可直接进入低风险突破买入观察的标的。")}</div>`,
+        `<div class="pool-block"><h3>B类：日线预警池 <span class="pill warn">${poolCount("B")}只</span></h3>${renderSimpleTable(observationHeaders, coreRows(poolItems("B", 10), false), "今日 B 类数量：0。")}</div>`,
+        `<div class="pool-block"><h3>C1类：强趋势右尾观察池 <span class="pill warn">${poolCount("C1")}只</span></h3>${renderSimpleTable(c1Headers, c1Rows, "今日 C1 类数量：0。")}</div>`,
+        `<div class="pool-block"><h3>C2 / D 排除摘要</h3>${renderSimpleTable([{ label: "股票", left: true }, { label: "代码" }, { label: "原因", left: true }], noChaseRows, "无重点不追标的。")}</div>`,
+        `<div class="pool-block"><h3>成长观察池</h3><p class="review-note">这些不是买入清单，只是后续重点跟踪池。</p>${renderSimpleTable([{ label: "排名" }, { label: "股票", left: true }, { label: "代码" }, { label: "题材", left: true }, { label: "成长分" }, { label: "营收同比%" }, { label: "净利同比%" }, { label: "ROE%" }, { label: "距压力区%" }, { label: "观察触发条件", left: true }], growthRows, "暂无成长分可用的观察对象。")}</div>`,
+      ].join("");
+      renderMarkdownLike(document.getElementById("aiReportContent"), DASHBOARD.aiAnalysis || "");
+      document.querySelectorAll("[data-focus-code]").forEach(button => {
+        button.addEventListener("click", () => {
+          const code = button.dataset.focusCode;
+          if (!code) return;
+          state.code = code;
+          state.hoverIndex = null;
+          setVisibleByBars(DEFAULT_BARS, "120");
+          renderRows();
+          renderChart();
+          document.querySelector(".chart-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      });
+    }
 
     function candidateByCode(code) {
       return DASHBOARD.candidates.find(item => item.code === code);
@@ -1144,6 +1659,7 @@ HTML_TEMPLATE = """<!doctype html>
     });
 
     window.addEventListener("resize", renderChart);
+    renderReportSections();
     renderTagFilter();
     renderRows();
     renderAIAnalysis();

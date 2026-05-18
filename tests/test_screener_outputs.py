@@ -53,11 +53,15 @@ def test_write_outputs_creates_report_files(tmp_path) -> None:
     assert "平安银行" in markdown_path.read_text(encoding="utf-8")
     html = html_path.read_text(encoding="utf-8")
     assert "A股突破选股复核" in html
+    assert "日报复核总览" in html
+    assert "Final action" in html
     assert "tagFilter" in html
     assert "金融科技" in html
     assert "成长分" in html
     assert "revenueYoy" in html
     assert "AI选股分析员" in html
+    assert "是否在买入区" in html
+    assert "近5日涨幅%" in html
     assert (tmp_path / "ai_analysis.md").exists()
 
 
