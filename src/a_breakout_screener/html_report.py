@@ -351,6 +351,90 @@ HTML_TEMPLATE = """<!doctype html>
     .pool-block {
       margin-top: 12px;
     }
+    .action-buttons {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      white-space: nowrap;
+    }
+    .action-button {
+      padding: 4px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      line-height: 1.25;
+    }
+    .action-button.primary {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 700;
+    }
+    .action-button.buy {
+      border-color: #f1d19b;
+      background: #fff7e8;
+      color: var(--warn);
+      font-weight: 700;
+    }
+    .position-positive {
+      color: var(--up);
+      font-weight: 700;
+    }
+    .position-negative {
+      color: var(--down);
+      font-weight: 700;
+    }
+    .chart-main {
+      display: block;
+      min-height: auto;
+    }
+    .chart-main[hidden] {
+      display: none;
+    }
+    .chart-main .chart-panel {
+      min-height: 640px;
+    }
+    .position-dialog {
+      width: min(420px, calc(100vw - 32px));
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0;
+      box-shadow: var(--shadow);
+      color: var(--text);
+    }
+    .position-dialog::backdrop {
+      background: rgba(24, 32, 43, 0.38);
+    }
+    .position-form {
+      padding: 16px;
+    }
+    .position-form h2 {
+      margin: 0 0 12px;
+      font-size: 17px;
+      line-height: 1.35;
+    }
+    .field {
+      margin-top: 10px;
+    }
+    .field label {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .field input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 9px;
+      font: inherit;
+      font-size: 14px;
+    }
+    .dialog-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 14px;
+    }
     .ai-report-content {
       color: #2c3440;
       font-size: 13px;
@@ -673,6 +757,12 @@ HTML_TEMPLATE = """<!doctype html>
       <div class="verdict-box" id="reportFinalAction"></div>
     </section>
     <section class="review-section">
+      <h2>当前持仓</h2>
+      <p class="review-note">持仓数据写入服务器 <code>data/holdings/positions.json</code>，按最新收盘价估算浮盈亏。</p>
+      <div id="holdingsStatus" class="review-note"></div>
+      <div id="holdingsTable"></div>
+    </section>
+    <section class="review-section">
       <h2>市场环境与候选数量</h2>
       <div class="review-grid" id="reportMarketStatus"></div>
       <div class="pool-block" id="reportPoolCounts"></div>
@@ -691,40 +781,7 @@ HTML_TEMPLATE = """<!doctype html>
       <div class="ai-report-content" id="aiReportContent"></div>
     </section>
   </div>
-  <main>
-    <section class="table-panel">
-      <div class="section-head">
-        <h2>候选结果</h2>
-        <div class="filter-tools">
-          <select id="tagFilter" aria-label="按题材标签筛选">
-            <option value="">全部标签</option>
-          </select>
-          <span class="filter-count" id="filterCount"></span>
-        </div>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>排名</th>
-              <th>类型</th>
-              <th class="name">股票</th>
-              <th>收盘</th>
-              <th>市值(亿)</th>
-              <th>压力上沿</th>
-              <th>突破</th>
-              <th>成交倍数</th>
-              <th>量趋势</th>
-              <th>ATR%</th>
-              <th>得分</th>
-              <th>成长</th>
-              <th class="name">标签</th>
-            </tr>
-          </thead>
-          <tbody id="candidateRows"></tbody>
-        </table>
-      </div>
-    </section>
+  <main id="chartMain" class="chart-main" hidden>
     <section class="chart-panel">
       <div class="section-head">
         <div class="chart-title">
@@ -773,6 +830,32 @@ HTML_TEMPLATE = """<!doctype html>
       </div>
     </section>
   </main>
+  <dialog class="position-dialog" id="positionDialog">
+    <form method="dialog" class="position-form" id="positionForm">
+      <h2 id="positionTitle">记录买入</h2>
+      <input type="hidden" id="positionCode">
+      <div class="field">
+        <label for="positionPrice">买入价格</label>
+        <input id="positionPrice" type="number" step="0.001" min="0" required>
+      </div>
+      <div class="field">
+        <label for="positionQuantity">数量</label>
+        <input id="positionQuantity" type="number" step="1" min="1" required>
+      </div>
+      <div class="field">
+        <label for="positionDate">买入日期</label>
+        <input id="positionDate" type="date" required>
+      </div>
+      <div class="field">
+        <label for="positionNote">备注</label>
+        <input id="positionNote" type="text" placeholder="可选">
+      </div>
+      <div class="dialog-actions">
+        <button type="button" id="cancelPosition">取消</button>
+        <button type="submit" class="active">保存</button>
+      </div>
+    </form>
+  </dialog>
   <script>
     const DASHBOARD = __DASHBOARD_DATA__;
     const MIN_BARS = 24;
@@ -790,8 +873,11 @@ HTML_TEMPLATE = """<!doctype html>
       dragStartEnd: 0,
       activeRange: "120",
       tagFilter: "",
-      lastDraw: null
+      lastDraw: null,
+      positions: [],
+      holdingsApiAvailable: true
     };
+    const HOLDINGS_API = "api/holdings";
 
     const fmt = (value, digits = 2) => {
       if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
@@ -900,15 +986,25 @@ HTML_TEMPLATE = """<!doctype html>
       return `<div class="review-table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
     }
 
-    function candidateLink(item) {
-      return `<button type="button" class="link-button" data-focus-code="${escapeHtml(item.code)}">${escapeHtml(item.name)}</button>`;
+    function candidateName(item) {
+      return escapeHtml(item.name || "-");
+    }
+
+    function actionButtons(item) {
+      return `
+        <span class="action-buttons">
+          <button type="button" class="action-button primary" data-chart-code="${escapeHtml(item.code)}">查看K线</button>
+          <button type="button" class="action-button buy" data-buy-code="${escapeHtml(item.code)}">已买入</button>
+        </span>
+      `;
     }
 
     function coreRows(items, includeTradeConstraints = false) {
       return items.map((item, index) => {
         const row = [
           escapeHtml(index + 1),
-          candidateLink(item),
+          candidateName(item),
+          actionButtons(item),
           escapeHtml(item.code),
           escapeHtml(item.primaryTag || "未标记"),
           escapeHtml(fmt(item.latestClose)),
@@ -1032,7 +1128,7 @@ HTML_TEMPLATE = """<!doctype html>
       );
 
       const coreHeaders = [
-        { label: "排名" }, { label: "股票", left: true }, { label: "代码" }, { label: "题材", left: true },
+        { label: "排名" }, { label: "股票", left: true }, { label: "操作", left: true }, { label: "代码" }, { label: "题材", left: true },
         { label: "收盘" }, { label: "压力上沿" }, { label: "突破%" }, { label: "成交额倍数" },
         { label: "量能来源" }, { label: "触碰" }, { label: "跨度周" }, { label: "技术分" },
         { label: "成长分" }, { label: "买入区" }, { label: "交易止损" },
@@ -1046,14 +1142,15 @@ HTML_TEMPLATE = """<!doctype html>
       ];
       const observationHeaders = [...coreHeaders, { label: "结论", left: true }];
       const c1Headers = [
-        { label: "排名" }, { label: "股票", left: true }, { label: "代码" }, { label: "题材", left: true },
+        { label: "排名" }, { label: "股票", left: true }, { label: "操作", left: true }, { label: "代码" }, { label: "题材", left: true },
         { label: "收盘" }, { label: "压力上沿" }, { label: "突破%" }, { label: "成交额倍数" },
         { label: "近5日涨幅%" }, { label: "近10日涨幅%" }, { label: "是否连续涨停" },
         { label: "是否长上影" }, { label: "技术分" }, { label: "风险", left: true }, { label: "结论", left: true },
       ];
       const c1Rows = poolItems("C1", 5).map((item, index) => [
         escapeHtml(index + 1),
-        candidateLink(item),
+        candidateName(item),
+        actionButtons(item),
         escapeHtml(item.code),
         escapeHtml(item.primaryTag || "未标记"),
         escapeHtml(fmt(item.latestClose)),
@@ -1068,10 +1165,11 @@ HTML_TEMPLATE = """<!doctype html>
         escapeHtml((item.breakoutPct || 0) >= 8 ? "已远离低风险买点" : "强趋势但追高风险"),
         escapeHtml(item.tradeAction || "右尾观察，不低吸"),
       ]);
-      const noChaseRows = noChaseItems(5).map(item => [candidateLink(item), escapeHtml(item.code), escapeHtml(exclusionReason(item))]);
+      const noChaseRows = noChaseItems(5).map(item => [candidateName(item), actionButtons(item), escapeHtml(item.code), escapeHtml(exclusionReason(item))]);
       const growthRows = growthItems(10).map((item, index) => [
         escapeHtml(index + 1),
-        candidateLink(item),
+        candidateName(item),
+        actionButtons(item),
         escapeHtml(item.code),
         escapeHtml(item.primaryTag || "未标记"),
         escapeHtml(fmt(item.growthScore, 1)),
@@ -1085,22 +1183,160 @@ HTML_TEMPLATE = """<!doctype html>
         `<div class="pool-block"><h3>A类：周线确认突破池 <span class="pill">${poolCount("A")}只</span></h3>${renderSimpleTable(actionHeaders, coreRows(poolItems("A"), true), "今日 A 类数量：0。没有可直接进入低风险突破买入观察的标的。")}</div>`,
         `<div class="pool-block"><h3>B类：日线预警池 <span class="pill warn">${poolCount("B")}只</span></h3>${renderSimpleTable(observationHeaders, coreRows(poolItems("B", 10), false), "今日 B 类数量：0。")}</div>`,
         `<div class="pool-block"><h3>C1类：强趋势右尾观察池 <span class="pill warn">${poolCount("C1")}只</span></h3>${renderSimpleTable(c1Headers, c1Rows, "今日 C1 类数量：0。")}</div>`,
-        `<div class="pool-block"><h3>C2 / D 排除摘要</h3>${renderSimpleTable([{ label: "股票", left: true }, { label: "代码" }, { label: "原因", left: true }], noChaseRows, "无重点不追标的。")}</div>`,
-        `<div class="pool-block"><h3>成长观察池</h3><p class="review-note">这些不是买入清单，只是后续重点跟踪池。</p>${renderSimpleTable([{ label: "排名" }, { label: "股票", left: true }, { label: "代码" }, { label: "题材", left: true }, { label: "成长分" }, { label: "营收同比%" }, { label: "净利同比%" }, { label: "ROE%" }, { label: "距压力区%" }, { label: "观察触发条件", left: true }], growthRows, "暂无成长分可用的观察对象。")}</div>`,
+        `<div class="pool-block"><h3>C2 / D 排除摘要</h3>${renderSimpleTable([{ label: "股票", left: true }, { label: "操作", left: true }, { label: "代码" }, { label: "原因", left: true }], noChaseRows, "无重点不追标的。")}</div>`,
+        `<div class="pool-block"><h3>成长观察池</h3><p class="review-note">这些不是买入清单，只是后续重点跟踪池。</p>${renderSimpleTable([{ label: "排名" }, { label: "股票", left: true }, { label: "操作", left: true }, { label: "代码" }, { label: "题材", left: true }, { label: "成长分" }, { label: "营收同比%" }, { label: "净利同比%" }, { label: "ROE%" }, { label: "距压力区%" }, { label: "观察触发条件", left: true }], growthRows, "暂无成长分可用的观察对象。")}</div>`,
       ].join("");
       renderMarkdownLike(document.getElementById("aiReportContent"), DASHBOARD.aiAnalysis || "");
-      document.querySelectorAll("[data-focus-code]").forEach(button => {
-        button.addEventListener("click", () => {
-          const code = button.dataset.focusCode;
-          if (!code) return;
-          state.code = code;
-          state.hoverIndex = null;
-          setVisibleByBars(DEFAULT_BARS, "120");
-          renderRows();
-          renderChart();
-          document.querySelector(".chart-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
-        });
+      bindReportActions();
+    }
+
+    function bindReportActions() {
+      document.querySelectorAll("[data-chart-code]").forEach(button => {
+        if (button.dataset.bound === "1") return;
+        button.dataset.bound = "1";
+        button.addEventListener("click", () => openChart(button.dataset.chartCode));
       });
+      document.querySelectorAll("[data-buy-code]").forEach(button => {
+        if (button.dataset.bound === "1") return;
+        button.dataset.bound = "1";
+        button.addEventListener("click", () => openPositionDialog(button.dataset.buyCode));
+      });
+      document.querySelectorAll("[data-delete-position]").forEach(button => {
+        if (button.dataset.bound === "1") return;
+        button.dataset.bound = "1";
+        button.addEventListener("click", () => deletePosition(button.dataset.deletePosition));
+      });
+    }
+
+    function openChart(code) {
+      if (!code) return;
+      state.code = code;
+      state.hoverIndex = null;
+      document.getElementById("chartMain").hidden = false;
+      setVisibleByBars(DEFAULT_BARS, "120");
+      requestAnimationFrame(() => {
+        renderChart();
+        document.getElementById("chartMain").scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
+
+    async function loadHoldings() {
+      try {
+        const response = await fetch(HOLDINGS_API, { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const payload = await response.json();
+        state.positions = Array.isArray(payload.positions) ? payload.positions : [];
+        state.holdingsApiAvailable = true;
+      } catch (error) {
+        state.positions = [];
+        state.holdingsApiAvailable = false;
+        console.error("failed to load holdings", error);
+      }
+      renderHoldings();
+    }
+
+    function renderHoldings() {
+      const status = document.getElementById("holdingsStatus");
+      const target = document.getElementById("holdingsTable");
+      if (!state.holdingsApiAvailable) {
+        status.textContent = "持仓 API 不可用，无法落地记录。请检查 a-breakout-holdings-api 服务。";
+        target.innerHTML = "";
+        return;
+      }
+      status.textContent = state.positions.length ? `已记录 ${state.positions.length} 笔持仓。` : "暂无持仓记录。";
+      const rows = state.positions.map(position => {
+        const item = candidateByCode(position.code) || {};
+        const latest = Number(item.latestClose || position.latest_price || 0);
+        const buyPrice = Number(position.buy_price || 0);
+        const quantity = Number(position.quantity || 0);
+        const cost = buyPrice * quantity;
+        const marketValue = latest > 0 ? latest * quantity : 0;
+        const pnl = marketValue - cost;
+        const pnlPct = cost > 0 && latest > 0 ? pnl / cost * 100 : null;
+        const pnlClass = pnl >= 0 ? "position-positive" : "position-negative";
+        return [
+          escapeHtml(position.buy_date || "-"),
+          escapeHtml(position.name || item.name || "-"),
+          escapeHtml(position.code || "-"),
+          escapeHtml(fmt(buyPrice, 3)),
+          escapeHtml(quantity),
+          escapeHtml(latest > 0 ? fmt(latest, 2) : "-"),
+          escapeHtml(fmt(cost, 2)),
+          escapeHtml(marketValue > 0 ? fmt(marketValue, 2) : "-"),
+          `<span class="${pnlClass}">${latest > 0 ? escapeHtml(fmt(pnl, 2)) : "-"}</span>`,
+          `<span class="${pnlClass}">${pnlPct === null ? "-" : escapeHtml(fmt(pnlPct, 2) + "%")}</span>`,
+          `<span class="action-buttons"><button type="button" class="action-button primary" data-chart-code="${escapeHtml(position.code)}">查看K线</button><button type="button" class="action-button" data-delete-position="${escapeHtml(position.id)}">删除</button></span>`,
+        ];
+      });
+      target.innerHTML = renderSimpleTable(
+        [
+          { label: "买入日期" }, { label: "股票", left: true }, { label: "代码" },
+          { label: "买入价" }, { label: "数量" }, { label: "当前价" },
+          { label: "成本" }, { label: "市值" }, { label: "浮盈亏" }, { label: "浮盈亏%" },
+          { label: "操作", left: true },
+        ],
+        rows,
+        "暂无持仓记录。"
+      );
+      bindReportActions();
+    }
+
+    function openPositionDialog(code) {
+      const item = candidateByCode(code);
+      if (!item) return;
+      const dialog = document.getElementById("positionDialog");
+      document.getElementById("positionTitle").textContent = `记录买入：${item.code} ${item.name}`;
+      document.getElementById("positionCode").value = item.code;
+      document.getElementById("positionPrice").value = item.latestClose || "";
+      document.getElementById("positionQuantity").value = "";
+      document.getElementById("positionDate").value = new Date().toISOString().slice(0, 10);
+      document.getElementById("positionNote").value = "";
+      if (typeof dialog.showModal === "function") {
+        dialog.showModal();
+      } else {
+        const price = window.prompt("买入价格", item.latestClose || "");
+        if (!price) return;
+        const quantity = window.prompt("数量", "");
+        if (!quantity) return;
+        savePosition({ code: item.code, buy_price: price, quantity, buy_date: new Date().toISOString().slice(0, 10), note: "" });
+      }
+    }
+
+    async function savePosition(payload) {
+      const item = candidateByCode(payload.code);
+      const body = {
+        code: payload.code,
+        name: item?.name || "",
+        buy_price: Number(payload.buy_price),
+        quantity: Number(payload.quantity),
+        buy_date: payload.buy_date,
+        note: payload.note || "",
+      };
+      try {
+        const response = await fetch(HOLDINGS_API, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload.error || `HTTP ${response.status}`);
+        }
+        await loadHoldings();
+      } catch (error) {
+        window.alert(`持仓保存失败：${error.message || error}`);
+      }
+    }
+
+    async function deletePosition(positionId) {
+      if (!positionId || !window.confirm("删除这条持仓记录？")) return;
+      try {
+        const response = await fetch(`${HOLDINGS_API}/${encodeURIComponent(positionId)}`, { method: "DELETE" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        await loadHoldings();
+      } catch (error) {
+        window.alert(`持仓删除失败：${error.message || error}`);
+      }
     }
 
     function candidateByCode(code) {
@@ -1632,18 +1868,21 @@ HTML_TEMPLATE = """<!doctype html>
       }
     });
 
-    document.getElementById("tagFilter").addEventListener("change", (event) => {
-      state.tagFilter = event.target.value;
-      const rows = filteredCandidates();
-      if (!rows.some(item => item.code === state.code)) {
-        state.code = rows[0]?.code || "";
-        state.hoverIndex = null;
-        setVisibleByBars(DEFAULT_BARS, "120");
-      }
-      renderTagFilter();
-      renderRows();
-      renderChart();
-    });
+    const tagFilterElement = document.getElementById("tagFilter");
+    if (tagFilterElement) {
+      tagFilterElement.addEventListener("change", (event) => {
+        state.tagFilter = event.target.value;
+        const rows = filteredCandidates();
+        if (!rows.some(item => item.code === state.code)) {
+          state.code = rows[0]?.code || "";
+          state.hoverIndex = null;
+          setVisibleByBars(DEFAULT_BARS, "120");
+        }
+        renderTagFilter();
+        renderRows();
+        renderChart();
+      });
+    }
 
     document.querySelectorAll("[data-range]").forEach(button => {
       button.addEventListener("click", () => {
@@ -1658,13 +1897,29 @@ HTML_TEMPLATE = """<!doctype html>
       renderChart();
     });
 
-    window.addEventListener("resize", renderChart);
+    window.addEventListener("resize", () => {
+      if (!document.getElementById("chartMain").hidden) renderChart();
+    });
     renderReportSections();
-    renderTagFilter();
-    renderRows();
     renderAIAnalysis();
-    setVisibleByBars(DEFAULT_BARS, "120");
-    renderChart();
+    loadHoldings();
+
+    document.getElementById("cancelPosition").addEventListener("click", () => {
+      document.getElementById("positionDialog").close();
+    });
+    document.getElementById("positionForm").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const code = document.getElementById("positionCode").value;
+      savePosition({
+        code,
+        buy_price: document.getElementById("positionPrice").value,
+        quantity: document.getElementById("positionQuantity").value,
+        buy_date: document.getElementById("positionDate").value,
+        note: document.getElementById("positionNote").value,
+      }).then(() => {
+        document.getElementById("positionDialog").close();
+      });
+    });
   </script>
 </body>
 </html>

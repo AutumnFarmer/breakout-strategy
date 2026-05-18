@@ -31,6 +31,10 @@ def stocks_block(indent: str) -> str:
     return indented(
         f"""
 {marker}
+handle_path {site_path}/api/* {{
+	reverse_proxy 127.0.0.1:8766
+}}
+
 handle_path {site_path}* {{
 	root * {site_root}
 	file_server
@@ -105,8 +109,10 @@ if marker in text:
     marker_pos = text.index(marker)
     start = line_start_at(text, marker_pos)
     indent = line_indent_at(text, marker_pos)
-    handle_start = text.index(f"\n{indent}handle_path", marker_pos)
-    open_pos = text.index("{", handle_start)
+    static_handle_start = text.find(f"\n{indent}handle_path {site_path}*", marker_pos)
+    if static_handle_start < 0:
+        static_handle_start = text.index(f"\n{indent}handle_path", marker_pos)
+    open_pos = text.index("{", static_handle_start)
     end = find_matching_brace(text, open_pos) + 1
     if end < len(text) and text[end] == "\n":
         end += 1
