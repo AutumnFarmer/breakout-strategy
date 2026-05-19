@@ -117,14 +117,13 @@ def _run(args: argparse.Namespace, config: AppConfig) -> int:
     if should_send:
         body = result.markdown_path.read_text(encoding="utf-8")
         subject = build_daily_email_subject(result)
-        attachments = _daily_scan_email_attachments(result)
         send_report(
             email_config=config.email,
             subject=subject,
             body=body,
-            attachments=attachments,
+            attachments=[],
         )
-        print(f"邮件发送完成，附件 {len(attachments)} 个")
+        print("邮件发送完成，正文邮件，无附件")
     else:
         print("邮件发送已跳过")
     return 0
