@@ -1050,6 +1050,7 @@ HTML_TEMPLATE = """<!doctype html>
       tagFilter: "",
       lastDraw: null,
       positions: [],
+      holdingsQuote: null,
       holdingsApiAvailable: true
     };
     const HOLDINGS_API = "api/holdings";
@@ -1586,9 +1587,11 @@ HTML_TEMPLATE = """<!doctype html>
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const payload = await response.json();
         state.positions = Array.isArray(payload.positions) ? payload.positions : [];
+        state.holdingsQuote = payload.quote || null;
         state.holdingsApiAvailable = true;
       } catch (error) {
         state.positions = [];
+        state.holdingsQuote = null;
         state.holdingsApiAvailable = false;
         console.error("failed to load holdings", error);
       }
@@ -1603,10 +1606,26 @@ HTML_TEMPLATE = """<!doctype html>
         target.innerHTML = "";
         return;
       }
-      status.textContent = state.positions.length ? `已记录 ${state.positions.length} 笔持仓。` : "暂无持仓记录。";
+      const quote = state.holdingsQuote || {};
+      if (!state.positions.length) {
+        status.textContent = "暂无持仓记录。";
+      } else if (quote.status === "ok") {
+        status.textContent = `已记录 ${state.positions.length} 笔持仓；实时行情 ${quote.matched || 0}/${quote.requested || state.positions.length}，更新时间 ${quote.fetched_at || "-"}。`;
+      } else if (quote.status === "stale") {
+        status.textContent = `已记录 ${state.positions.length} 笔持仓；实时行情临时不可用，暂用上一份实时价 ${quote.stale_price_time || "-"}。`;
+      } else if (quote.status === "fallback") {
+        status.textContent = `已记录 ${state.positions.length} 笔持仓；实时行情临时不可用，暂用最新可得行情/收盘价 ${quote.fetched_at || "-"}。`;
+      } else {
+        status.textContent = `已记录 ${state.positions.length} 笔持仓；实时行情暂不可用，页面将回退到最新收盘价。${quote.error ? "原因：" + quote.error : ""}`;
+      }
       const rows = state.positions.map(position => {
         const item = candidateByCode(position.code) || {};
-        const latest = Number(item.latestClose || position.latest_price || 0);
+        const quoteLatest = Number(position.latest_price || 0);
+        const fallbackLatest = Number(item.latestClose || 0);
+        const latest = quoteLatest > 0 ? quoteLatest : fallbackLatest;
+        const latestLabel = quoteLatest > 0
+          ? fmt(quoteLatest, 2)
+          : (fallbackLatest > 0 ? `${fmt(fallbackLatest, 2)} 收盘` : "-");
         const buyPrice = Number(position.buy_price || 0);
         const quantity = Number(position.quantity || 0);
         const cost = buyPrice * quantity;
@@ -1620,7 +1639,9 @@ HTML_TEMPLATE = """<!doctype html>
           escapeHtml(position.code || "-"),
           escapeHtml(fmt(buyPrice, 3)),
           escapeHtml(quantity),
-          escapeHtml(latest > 0 ? fmt(latest, 2) : "-"),
+          escapeHtml(latestLabel),
+          escapeHtml(position.price_time || (fallbackLatest > 0 ? DASHBOARD.meta.latestTradeDate : "-")),
+          escapeHtml(position.price_source || (fallbackLatest > 0 ? "latest_close" : "-")),
           escapeHtml(fmt(cost, 2)),
           escapeHtml(marketValue > 0 ? fmt(marketValue, 2) : "-"),
           `<span class="${pnlClass}">${latest > 0 ? escapeHtml(fmt(pnl, 2)) : "-"}</span>`,
@@ -1632,6 +1653,7 @@ HTML_TEMPLATE = """<!doctype html>
         [
           { label: "买入日期" }, { label: "股票", left: true }, { label: "代码" },
           { label: "买入价" }, { label: "数量" }, { label: "当前价" },
+          { label: "价格时间" }, { label: "来源" },
           { label: "成本" }, { label: "市值" }, { label: "浮盈亏" }, { label: "浮盈亏%" },
           { label: "操作", left: true },
         ],

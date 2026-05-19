@@ -57,6 +57,9 @@ def test_write_outputs_creates_report_files(tmp_path) -> None:
     assert "Final action" not in html
     assert "当前持仓" in html
     assert "api/holdings" in html
+    assert "holdingsQuote" in html
+    assert "实时行情" in html
+    assert "价格时间" in html
     assert "查看K线" in html
     assert 'id="chartDialog"' in html
     assert 'id="closeChart"' in html

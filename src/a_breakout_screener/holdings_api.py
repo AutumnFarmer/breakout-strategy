@@ -6,13 +6,28 @@ import json
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import threading
+import time
 from tempfile import NamedTemporaryFile
 from typing import Any
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
+import pandas as pd
+
+from .data import fetch_realtime_spot, fetch_spot
+
 
 DEFAULT_DATA_FILE = Path("data/holdings/positions.json")
+QUOTE_CACHE_TTL_SECONDS = 20
+_QUOTE_CACHE_LOCK = threading.Lock()
+_QUOTE_CACHE: dict[str, Any] = {
+    "expires_at": 0.0,
+    "quotes": {},
+    "meta": {"status": "empty", "source": "akshare_spot_em"},
+    "last_success_quotes": {},
+    "last_success_meta": {},
+}
 
 
 def load_positions(data_file: Path) -> list[dict[str, Any]]:
@@ -42,6 +57,152 @@ def save_positions(data_file: Path, positions: list[dict[str, Any]]) -> None:
         json.dump(payload, fp, ensure_ascii=False, indent=2)
         fp.write("\n")
     tmp_path.replace(data_file)
+
+
+def positions_with_latest_quotes(positions: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    codes = {str(item.get("code") or "").strip().zfill(6) for item in positions if item.get("code")}
+    if not codes:
+        return list(positions), {
+            "status": "empty",
+            "source": "akshare_spot_em",
+            "requested": 0,
+            "matched": 0,
+        }
+    quotes, meta = _cached_quote_map()
+    enriched: list[dict[str, Any]] = []
+    for item in positions:
+        row = dict(item)
+        code = str(row.get("code") or "").strip().zfill(6)
+        quote = quotes.get(code)
+        if quote:
+            row["latest_price"] = quote["latest_price"]
+            row["latest_name"] = quote.get("name") or row.get("name") or ""
+            row["price_time"] = quote["price_time"]
+            row["price_source"] = quote["price_source"]
+            row["pct_change"] = quote.get("pct_change")
+            row["amount"] = quote.get("amount")
+        enriched.append(row)
+
+    found = sum(1 for item in enriched if item.get("latest_price"))
+    return enriched, {**meta, "requested": len(codes), "matched": found}
+
+
+def _cached_quote_map() -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    now = time.time()
+    with _QUOTE_CACHE_LOCK:
+        if now < float(_QUOTE_CACHE.get("expires_at") or 0):
+            return dict(_QUOTE_CACHE.get("quotes") or {}), dict(_QUOTE_CACHE.get("meta") or {})
+
+    fetched_at = datetime.now().isoformat(timespec="seconds")
+    try:
+        quotes = _quote_map_from_spot(
+            _fetch_realtime_spot_with_retry(),
+            fetched_at=fetched_at,
+            source="akshare_spot_em",
+        )
+        meta = {
+            "status": "ok",
+            "source": "akshare_spot_em",
+            "fetched_at": fetched_at,
+            "ttl_seconds": QUOTE_CACHE_TTL_SECONDS,
+            "quote_count": len(quotes),
+        }
+    except Exception as exc:  # pragma: no cover - network/data-source fallback path
+        quotes, meta = _quote_fallback(exc, fetched_at)
+
+    with _QUOTE_CACHE_LOCK:
+        _QUOTE_CACHE["expires_at"] = now + QUOTE_CACHE_TTL_SECONDS
+        _QUOTE_CACHE["quotes"] = quotes
+        _QUOTE_CACHE["meta"] = meta
+        if meta.get("status") == "ok":
+            _QUOTE_CACHE["last_success_quotes"] = quotes
+            _QUOTE_CACHE["last_success_meta"] = meta
+    return quotes, meta
+
+
+def _fetch_realtime_spot_with_retry() -> pd.DataFrame:
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            return fetch_realtime_spot()
+        except Exception as exc:  # pragma: no cover - network/data-source fallback path
+            last_exc = exc
+            if attempt == 0:
+                time.sleep(1.0)
+    assert last_exc is not None
+    raise last_exc
+
+
+def _quote_fallback(exc: Exception, fetched_at: str) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    with _QUOTE_CACHE_LOCK:
+        last_quotes = dict(_QUOTE_CACHE.get("last_success_quotes") or {})
+        last_meta = dict(_QUOTE_CACHE.get("last_success_meta") or {})
+    if last_quotes:
+        return last_quotes, {
+            **last_meta,
+            "status": "stale",
+            "fetched_at": fetched_at,
+            "stale_price_time": last_meta.get("fetched_at"),
+            "ttl_seconds": QUOTE_CACHE_TTL_SECONDS,
+            "error": str(exc),
+        }
+
+    try:
+        fallback_at = datetime.now().isoformat(timespec="seconds")
+        quotes = _quote_map_from_spot(
+            fetch_spot(),
+            fetched_at=fallback_at,
+            source="latest_spot_fallback",
+        )
+        return quotes, {
+            "status": "fallback",
+            "source": "latest_spot_fallback",
+            "fetched_at": fallback_at,
+            "ttl_seconds": QUOTE_CACHE_TTL_SECONDS,
+            "quote_count": len(quotes),
+            "error": str(exc),
+        }
+    except Exception as fallback_exc:  # pragma: no cover - network/data-source fallback path
+        return {}, {
+            "status": "error",
+            "source": "akshare_spot_em",
+            "fetched_at": fetched_at,
+            "ttl_seconds": QUOTE_CACHE_TTL_SECONDS,
+            "error": f"{exc}; fallback failed: {fallback_exc}",
+        }
+
+
+def _quote_map_from_spot(spot: pd.DataFrame, fetched_at: str, source: str = "akshare_spot_em") -> dict[str, dict[str, Any]]:
+    if spot.empty:
+        return {}
+    quotes: dict[str, dict[str, Any]] = {}
+    df = spot.copy()
+    df["code"] = df["code"].astype(str).str.extract(r"(\d{6})", expand=False).str.zfill(6)
+    for _, row in df.dropna(subset=["code"]).iterrows():
+        code = str(row["code"]).zfill(6)
+        latest = _optional_float(row.get("latest"))
+        if latest is None or latest <= 0:
+            continue
+        quotes[code] = {
+            "code": code,
+            "name": str(row.get("name") or ""),
+            "latest_price": round(latest, 4),
+            "pct_change": _optional_float(row.get("pct_change")),
+            "amount": _optional_float(row.get("amount")),
+            "price_time": fetched_at,
+            "price_source": source,
+        }
+    return quotes
+
+
+def _optional_float(value: object) -> float | None:
+    if pd.isna(value):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number
 
 
 def create_position(data: dict[str, Any]) -> dict[str, Any]:
@@ -83,7 +244,8 @@ class HoldingsHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True})
             return
         if path.endswith("/holdings"):
-            self._send_json({"positions": load_positions(self.data_file)})
+            positions, quote_meta = positions_with_latest_quotes(load_positions(self.data_file))
+            self._send_json({"positions": positions, "quote": quote_meta})
             return
         self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
