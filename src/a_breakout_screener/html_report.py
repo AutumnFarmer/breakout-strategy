@@ -507,6 +507,39 @@ HTML_TEMPLATE = """<!doctype html>
     .chart-main .chart-panel {
       min-height: 640px;
     }
+    .chart-dialog {
+      width: min(1180px, calc(100vw - 24px));
+      max-height: calc(100vh - 24px);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0;
+      background: var(--panel);
+      box-shadow: 0 24px 70px rgba(24, 32, 43, 0.24);
+      color: var(--text);
+      overflow: hidden;
+    }
+    .chart-dialog::backdrop {
+      background: rgba(24, 32, 43, 0.48);
+    }
+    .chart-dialog .chart-main {
+      display: block;
+      padding: 0;
+      min-height: auto;
+    }
+    .chart-dialog .chart-panel {
+      max-height: calc(100vh - 24px);
+      min-height: min(760px, calc(100vh - 24px));
+      border: 0;
+      border-radius: 8px;
+      box-shadow: none;
+      overflow: auto;
+    }
+    .chart-close-button {
+      border-color: #ffd6dc;
+      background: #fff3f5;
+      color: var(--up);
+      font-weight: 700;
+    }
     .position-dialog {
       width: min(420px, calc(100vw - 32px));
       border: 1px solid var(--line);
@@ -920,55 +953,58 @@ HTML_TEMPLATE = """<!doctype html>
       <div class="ai-report-content" id="aiReportContent"></div>
     </section>
   </div>
-  <main id="chartMain" class="chart-main" hidden>
-    <section class="chart-panel">
-      <div class="section-head">
-        <div class="chart-title">
-          <h2 id="chartName">历史K线</h2>
-          <div class="meta-line" id="chartMeta"></div>
+  <dialog class="chart-dialog" id="chartDialog">
+    <main id="chartMain" class="chart-main">
+      <section class="chart-panel">
+        <div class="section-head">
+          <div class="chart-title">
+            <h2 id="chartName">历史K线</h2>
+            <div class="meta-line" id="chartMeta"></div>
+          </div>
+          <div class="range-controls">
+            <button type="button" data-range="30">1月</button>
+            <button type="button" data-range="60">60日</button>
+            <button type="button" data-range="120" class="active">120日</button>
+            <button type="button" data-range="250">250日</button>
+            <button type="button" data-range="500">2年</button>
+            <button type="button" data-range="all">全部</button>
+            <button type="button" id="resetView">重置</button>
+            <button type="button" id="closeChart" class="chart-close-button">关闭</button>
+          </div>
         </div>
-        <div class="range-controls">
-          <button type="button" data-range="30">1月</button>
-          <button type="button" data-range="60">60日</button>
-          <button type="button" data-range="120" class="active">120日</button>
-          <button type="button" data-range="250">250日</button>
-          <button type="button" data-range="500">2年</button>
-          <button type="button" data-range="all">全部</button>
-          <button type="button" id="resetView">重置</button>
+        <div class="chart-box">
+          <div class="chart-shell">
+            <canvas id="klineCanvas" width="1200" height="620"></canvas>
+            <div class="chart-tooltip" id="chartTooltip"></div>
+          </div>
+          <div class="chart-help">拖拽平移，滚轮缩放，移动鼠标查看十字光标和 OHLC。</div>
         </div>
-      </div>
-      <div class="chart-box">
-        <div class="chart-shell">
-          <canvas id="klineCanvas" width="1200" height="620"></canvas>
-          <div class="chart-tooltip" id="chartTooltip"></div>
+        <div class="detail-grid">
+          <div class="detail"><span>信号类型</span><strong id="signalType"></strong></div>
+          <div class="detail"><span>交易结论</span><strong id="tradeAction"></strong></div>
+          <div class="detail"><span>压力区</span><strong id="pressureZone"></strong></div>
+          <div class="detail"><span>压力跨度</span><strong id="spanWeeks"></strong></div>
+          <div class="detail"><span>买入区</span><strong id="buyZone"></strong></div>
+          <div class="detail"><span>止损位</span><strong id="stopLoss"></strong></div>
+          <div class="detail"><span>量能口径</span><strong id="activitySource"></strong></div>
+          <div class="detail"><span>阻力触达</span><strong id="touches"></strong></div>
+          <div class="detail"><span>聚类大小</span><strong id="cluster"></strong></div>
+          <div class="detail"><span>ATR%</span><strong id="atr"></strong></div>
+          <div class="detail"><span>选中K线</span><strong id="hoverInfo"></strong></div>
+          <div class="detail"><span>财务期</span><strong id="financialDate"></strong></div>
+          <div class="detail"><span>成长分</span><strong id="growthScore"></strong></div>
+          <div class="detail"><span>营收同比</span><strong id="revenueYoy"></strong></div>
+          <div class="detail"><span>净利同比</span><strong id="profitYoy"></strong></div>
+          <div class="detail"><span>ROE</span><strong id="roe"></strong></div>
+          <div class="detail wide"><span>题材标签</span><strong id="tagDetail"></strong></div>
         </div>
-        <div class="chart-help">拖拽平移，滚轮缩放，移动鼠标查看十字光标和 OHLC。</div>
-      </div>
-      <div class="detail-grid">
-        <div class="detail"><span>信号类型</span><strong id="signalType"></strong></div>
-        <div class="detail"><span>交易结论</span><strong id="tradeAction"></strong></div>
-        <div class="detail"><span>压力区</span><strong id="pressureZone"></strong></div>
-        <div class="detail"><span>压力跨度</span><strong id="spanWeeks"></strong></div>
-        <div class="detail"><span>买入区</span><strong id="buyZone"></strong></div>
-        <div class="detail"><span>止损位</span><strong id="stopLoss"></strong></div>
-        <div class="detail"><span>量能口径</span><strong id="activitySource"></strong></div>
-        <div class="detail"><span>阻力触达</span><strong id="touches"></strong></div>
-        <div class="detail"><span>聚类大小</span><strong id="cluster"></strong></div>
-        <div class="detail"><span>ATR%</span><strong id="atr"></strong></div>
-        <div class="detail"><span>选中K线</span><strong id="hoverInfo"></strong></div>
-        <div class="detail"><span>财务期</span><strong id="financialDate"></strong></div>
-        <div class="detail"><span>成长分</span><strong id="growthScore"></strong></div>
-        <div class="detail"><span>营收同比</span><strong id="revenueYoy"></strong></div>
-        <div class="detail"><span>净利同比</span><strong id="profitYoy"></strong></div>
-        <div class="detail"><span>ROE</span><strong id="roe"></strong></div>
-        <div class="detail wide"><span>题材标签</span><strong id="tagDetail"></strong></div>
-      </div>
-      <div class="ai-panel" id="aiPanel">
-        <h2>AI 复核分析</h2>
-        <div class="ai-content" id="aiContent"></div>
-      </div>
-    </section>
-  </main>
+        <div class="ai-panel" id="aiPanel">
+          <h2>AI 复核分析</h2>
+          <div class="ai-content" id="aiContent"></div>
+        </div>
+      </section>
+    </main>
+  </dialog>
   <dialog class="position-dialog" id="positionDialog">
     <form method="dialog" class="position-form" id="positionForm">
       <h2 id="positionTitle">记录买入</h2>
@@ -1508,16 +1544,40 @@ HTML_TEMPLATE = """<!doctype html>
       target.scrollIntoView({ behavior: "smooth", block: "start" });
     }
 
+    function isChartOpen() {
+      const dialog = document.getElementById("chartDialog");
+      return Boolean(dialog?.open);
+    }
+
     function openChart(code) {
       if (!code) return;
       state.code = code;
       state.hoverIndex = null;
-      document.getElementById("chartMain").hidden = false;
+      const dialog = document.getElementById("chartDialog");
+      if (dialog && !dialog.open) {
+        if (typeof dialog.showModal === "function") {
+          dialog.showModal();
+        } else {
+          dialog.setAttribute("open", "open");
+        }
+      }
       setVisibleByBars(DEFAULT_BARS, "120");
       requestAnimationFrame(() => {
         renderChart();
-        document.getElementById("chartMain").scrollIntoView({ behavior: "smooth", block: "start" });
       });
+    }
+
+    function closeChart() {
+      const dialog = document.getElementById("chartDialog");
+      if (!dialog) return;
+      if (typeof dialog.close === "function" && dialog.open) {
+        dialog.close();
+      } else {
+        dialog.removeAttribute("open");
+      }
+      state.hoverIndex = null;
+      state.hoverX = null;
+      state.hoverY = null;
     }
 
     async function loadHoldings() {
@@ -2169,11 +2229,16 @@ HTML_TEMPLATE = """<!doctype html>
     });
 
     window.addEventListener("resize", () => {
-      if (!document.getElementById("chartMain").hidden) renderChart();
+      if (isChartOpen()) renderChart();
     });
     renderReportSections();
     renderAIAnalysis();
     loadHoldings();
+
+    document.getElementById("closeChart").addEventListener("click", closeChart);
+    document.getElementById("chartDialog").addEventListener("click", (event) => {
+      if (event.target === event.currentTarget) closeChart();
+    });
 
     document.getElementById("cancelPosition").addEventListener("click", () => {
       document.getElementById("positionDialog").close();

@@ -58,6 +58,8 @@ def test_write_outputs_creates_report_files(tmp_path) -> None:
     assert "当前持仓" in html
     assert "api/holdings" in html
     assert "查看K线" in html
+    assert 'id="chartDialog"' in html
+    assert 'id="closeChart"' in html
     assert "已买入" in html
     assert "data-pool-target" in html
     assert "data-theme-key" in html
