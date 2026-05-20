@@ -32,6 +32,16 @@ def generate_ai_analysis(
         return f"AI分析暂不可用：{_safe_error(exc)}"
 
 
+def generate_single_stock_analysis(config: AIAnalysisConfig, stock: dict[str, Any]) -> str:
+    if not config.enabled:
+        raise RuntimeError("AI analysis is disabled")
+    api_key = config.api_key or _discover_local_sub2api_key(config)
+    if not api_key:
+        raise RuntimeError("缺少 sub2api API key")
+    prompt = _build_single_stock_prompt(stock)
+    return _call_sub2api(config=config, api_key=api_key, prompt=prompt, max_tokens=900).strip()
+
+
 def _build_prompt(
     candidates: list[Candidate],
     scanned_count: int,
@@ -70,6 +80,31 @@ def _build_prompt(
         "## 重点候选复核\n"
         "## 风险与反证\n"
         "## 下次扫描观察\n\n"
+        "输入数据如下：\n"
+        f"{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def _build_single_stock_prompt(stock: dict[str, Any]) -> str:
+    payload = {
+        "generated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+        "stock": stock,
+    }
+    return (
+        "你是一个A股突破策略的单股AI分析员。请只分析输入中的这一只股票，"
+        "不要复盘整个市场或日报，不要输出泛泛宏观长文，不要承诺收益。\n\n"
+        "分析重点：\n"
+        "1. 用一句话给出当前结论：可复核 / 只观察 / 不追 / 排除。\n"
+        "2. 结合信号类型、题材、是否在交易区、压力区上沿、突破幅度、成交额倍数、"
+        "技术分、成长分和财务指标，说明为什么。\n"
+        "3. 明确下一步观察条件：回踩、放量、周线确认、跌回压力区、止损线等。\n"
+        "4. 明确风险：追高、假突破、量能衰减、基本面反证、题材孤立。\n"
+        "5. 这是研究辅助，不构成投资建议。\n\n"
+        "输出中文 Markdown，控制在 400-700 字，结构固定为：\n"
+        "## 单股结论\n"
+        "## 关键依据\n"
+        "## 观察条件\n"
+        "## 风险点\n\n"
         "输入数据如下：\n"
         f"{json.dumps(payload, ensure_ascii=False)}"
     )

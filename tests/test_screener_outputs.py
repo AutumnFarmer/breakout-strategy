@@ -63,6 +63,10 @@ def test_write_outputs_creates_report_files(tmp_path) -> None:
     assert "查看K线" in html
     assert 'id="chartDialog"' in html
     assert 'id="closeChart"' in html
+    assert "AI分析" in html
+    assert 'id="stockAiDialog"' in html
+    assert "api/stock-ai" in html
+    assert 'id="aiPanel"' not in html
     assert "已买入" in html
     assert "data-pool-target" in html
     assert "data-theme-key" in html

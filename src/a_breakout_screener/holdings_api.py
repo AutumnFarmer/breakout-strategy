@@ -15,6 +15,8 @@ from uuid import uuid4
 
 import pandas as pd
 
+from .ai_analysis import generate_single_stock_analysis
+from .config import load_config
 from .data import fetch_realtime_spot, fetch_spot
 
 
@@ -251,6 +253,9 @@ class HoldingsHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path.rstrip("/")
+        if path.endswith("/stock-ai"):
+            self._handle_stock_ai()
+            return
         if not path.endswith("/holdings"):
             self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
             return
@@ -264,6 +269,30 @@ class HoldingsHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
         self._send_json(position, HTTPStatus.CREATED)
+
+    def _handle_stock_ai(self) -> None:
+        try:
+            data = self._read_json()
+            stock = data.get("stock")
+            if not isinstance(stock, dict):
+                raise ValueError("stock is required")
+            code = str(stock.get("code") or "").strip()
+            if not code:
+                raise ValueError("stock.code is required")
+            analysis = generate_single_stock_analysis(load_config(Path("config.toml")).ai_analysis, stock)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        except Exception as exc:  # pragma: no cover - external AI gateway variance
+            self._send_json({"error": f"AI分析暂不可用：{exc}"}, HTTPStatus.BAD_GATEWAY)
+            return
+        self._send_json(
+            {
+                "code": code,
+                "analysis": analysis,
+                "generated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
 
     def do_DELETE(self) -> None:  # noqa: N802
         path = urlparse(self.path).path.rstrip("/")

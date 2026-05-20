@@ -551,6 +551,26 @@ HTML_TEMPLATE = """<!doctype html>
     .position-dialog::backdrop {
       background: rgba(24, 32, 43, 0.38);
     }
+    .stock-ai-dialog {
+      width: min(760px, calc(100vw - 28px));
+      max-height: calc(100vh - 28px);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0;
+      box-shadow: var(--shadow);
+      color: var(--text);
+    }
+    .stock-ai-dialog::backdrop {
+      background: rgba(24, 32, 43, 0.42);
+    }
+    .stock-ai-body {
+      max-height: min(620px, calc(100vh - 150px));
+      overflow: auto;
+      border: 1px solid #edf0f5;
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: #fbfcfe;
+    }
     .position-form {
       padding: 16px;
     }
@@ -998,10 +1018,6 @@ HTML_TEMPLATE = """<!doctype html>
           <div class="detail"><span>ROE</span><strong id="roe"></strong></div>
           <div class="detail wide"><span>题材标签</span><strong id="tagDetail"></strong></div>
         </div>
-        <div class="ai-panel" id="aiPanel">
-          <h2>AI 复核分析</h2>
-          <div class="ai-content" id="aiContent"></div>
-        </div>
       </section>
     </main>
   </dialog>
@@ -1031,6 +1047,15 @@ HTML_TEMPLATE = """<!doctype html>
       </div>
     </form>
   </dialog>
+  <dialog class="stock-ai-dialog" id="stockAiDialog">
+    <form method="dialog" class="position-form" id="stockAiForm">
+      <h2 id="stockAiTitle">单股 AI 分析</h2>
+      <div class="ai-report-content stock-ai-body" id="stockAiContent"></div>
+      <div class="dialog-actions">
+        <button type="button" id="closeStockAi">关闭</button>
+      </div>
+    </form>
+  </dialog>
   <script>
     const DASHBOARD = __DASHBOARD_DATA__;
     const MIN_BARS = 24;
@@ -1054,6 +1079,7 @@ HTML_TEMPLATE = """<!doctype html>
       holdingsApiAvailable: true
     };
     const HOLDINGS_API = "api/holdings";
+    const STOCK_AI_API = "api/stock-ai";
 
     const fmt = (value, digits = 2) => {
       if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
@@ -1295,6 +1321,7 @@ HTML_TEMPLATE = """<!doctype html>
       return `
         <span class="action-buttons">
           <button type="button" class="action-button primary" data-chart-code="${escapeHtml(item.code)}">查看K线</button>
+          <button type="button" class="action-button" data-ai-code="${escapeHtml(item.code)}">AI分析</button>
           <button type="button" class="action-button buy" data-buy-code="${escapeHtml(item.code)}">已买入</button>
         </span>
       `;
@@ -1511,6 +1538,11 @@ HTML_TEMPLATE = """<!doctype html>
         button.dataset.bound = "1";
         button.addEventListener("click", () => openPositionDialog(button.dataset.buyCode));
       });
+      document.querySelectorAll("[data-ai-code]").forEach(button => {
+        if (button.dataset.bound === "1") return;
+        button.dataset.bound = "1";
+        button.addEventListener("click", () => openStockAi(button.dataset.aiCode));
+      });
       document.querySelectorAll("[data-delete-position]").forEach(button => {
         if (button.dataset.bound === "1") return;
         button.dataset.bound = "1";
@@ -1646,7 +1678,7 @@ HTML_TEMPLATE = """<!doctype html>
           escapeHtml(marketValue > 0 ? fmt(marketValue, 2) : "-"),
           `<span class="${pnlClass}">${latest > 0 ? escapeHtml(fmt(pnl, 2)) : "-"}</span>`,
           `<span class="${pnlClass}">${pnlPct === null ? "-" : escapeHtml(fmt(pnlPct, 2) + "%")}</span>`,
-          `<span class="action-buttons"><button type="button" class="action-button primary" data-chart-code="${escapeHtml(position.code)}">查看K线</button><button type="button" class="action-button" data-delete-position="${escapeHtml(position.id)}">删除</button></span>`,
+          `<span class="action-buttons"><button type="button" class="action-button primary" data-chart-code="${escapeHtml(position.code)}">查看K线</button><button type="button" class="action-button" data-ai-code="${escapeHtml(position.code)}">AI分析</button><button type="button" class="action-button" data-delete-position="${escapeHtml(position.id)}">删除</button></span>`,
         ];
       });
       target.innerHTML = renderSimpleTable(
@@ -1661,6 +1693,72 @@ HTML_TEMPLATE = """<!doctype html>
         "暂无持仓记录。"
       );
       bindReportActions();
+    }
+
+    function stockAiPayload(item) {
+      return {
+        code: item.code,
+        name: item.name,
+        signalType: item.signalType,
+        signalReason: item.signalReason,
+        primaryTag: item.primaryTag,
+        tags: item.tags || [],
+        latestClose: item.latestClose,
+        buyZoneStatus: item.buyZoneStatus,
+        suggestedAction: suggestedAction(item),
+        zoneLow: item.zoneLow,
+        zoneMid: item.zoneMid,
+        zoneUpper: item.zoneUpper || item.resistance,
+        breakoutPct: item.breakoutPct,
+        activityRatio: item.activityRatio || item.volumeRatio,
+        activitySource: item.activitySource,
+        touches: item.touches,
+        spanWeeks: item.spanWeeks,
+        score: item.score,
+        growthScore: item.growthScore,
+        revenueYoy: item.revenueYoy,
+        profitYoy: item.profitYoy,
+        roe: item.roe,
+        debtToAssets: item.debtToAssets,
+        buyLow: item.buyLow,
+        buyHigh: item.buyHigh,
+        tradeStopLoss: item.tradeStopLoss || item.stopLoss,
+        recent5dPct: item.recent5dPct,
+        recent10dPct: item.recent10dPct,
+        longUpperShadow: item.longUpperShadow,
+      };
+    }
+
+    async function openStockAi(code) {
+      const item = candidateByCode(code);
+      if (!item) {
+        window.alert("未找到这只股票的候选数据，暂不能做单股 AI 分析。");
+        return;
+      }
+      const dialog = document.getElementById("stockAiDialog");
+      const title = document.getElementById("stockAiTitle");
+      const content = document.getElementById("stockAiContent");
+      title.textContent = `单股 AI 分析：${item.code} ${item.name}`;
+      content.innerHTML = '<p class="review-note">正在生成单股分析...</p>';
+      if (typeof dialog.showModal === "function") {
+        dialog.showModal();
+      } else {
+        dialog.setAttribute("open", "open");
+      }
+      try {
+        const response = await fetch(STOCK_AI_API, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ stock: stockAiPayload(item) }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload.error || `HTTP ${response.status}`);
+        }
+        renderMarkdownLike(content, payload.analysis || "单股 AI 没有返回内容。");
+      } catch (error) {
+        content.innerHTML = `<p class="review-note">单股 AI 暂不可用：${escapeHtml(error.message || error)}</p>`;
+      }
     }
 
     function openPositionDialog(code) {
@@ -2197,18 +2295,6 @@ HTML_TEMPLATE = """<!doctype html>
       }
     }
 
-    function renderAIAnalysis() {
-      const panel = document.getElementById("aiPanel");
-      const content = document.getElementById("aiContent");
-      const text = DASHBOARD.aiAnalysis || "";
-      if (!text) {
-        panel.style.display = "none";
-        return;
-      }
-      panel.style.display = "block";
-      renderMarkdownLike(content, text);
-    }
-
     canvas.addEventListener("pointerup", endDrag);
     canvas.addEventListener("pointercancel", endDrag);
     canvas.addEventListener("wheel", zoomAt, { passive: false });
@@ -2254,7 +2340,6 @@ HTML_TEMPLATE = """<!doctype html>
       if (isChartOpen()) renderChart();
     });
     renderReportSections();
-    renderAIAnalysis();
     loadHoldings();
 
     document.getElementById("closeChart").addEventListener("click", closeChart);
@@ -2264,6 +2349,9 @@ HTML_TEMPLATE = """<!doctype html>
 
     document.getElementById("cancelPosition").addEventListener("click", () => {
       document.getElementById("positionDialog").close();
+    });
+    document.getElementById("closeStockAi").addEventListener("click", () => {
+      document.getElementById("stockAiDialog").close();
     });
     document.getElementById("positionForm").addEventListener("submit", (event) => {
       event.preventDefault();
