@@ -391,6 +391,24 @@ HTML_TEMPLATE = """<!doctype html>
     .theme-detail-head h3 {
       margin: 0;
     }
+    .stock-search-bar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      max-width: 560px;
+    }
+    .stock-search-bar input {
+      flex: 1;
+      min-width: 180px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 7px 9px;
+      font: inherit;
+      font-size: 13px;
+    }
+    .stock-search-results {
+      margin-top: 10px;
+    }
     .action-buttons {
       display: inline-flex;
       gap: 6px;
@@ -955,6 +973,15 @@ HTML_TEMPLATE = """<!doctype html>
       <div id="holdingsTable"></div>
     </section>
     <section class="review-section">
+      <h2>股票K线搜索</h2>
+      <div class="stock-search-bar">
+        <input id="stockSearchInput" type="search" placeholder="输入代码或名称，例如 600519、平安、康希">
+        <button type="button" id="stockSearchButton" class="active">搜索</button>
+      </div>
+      <div id="stockSearchStatus" class="review-note"></div>
+      <div id="stockSearchResults" class="stock-search-results"></div>
+    </section>
+    <section class="review-section">
       <h2>候选分布</h2>
       <div class="review-grid" id="reportMarketStatus" hidden></div>
       <div class="pool-block" id="reportPoolCounts"></div>
@@ -989,6 +1016,7 @@ HTML_TEMPLATE = """<!doctype html>
             <button type="button" data-range="500">2年</button>
             <button type="button" data-range="all">全部</button>
             <button type="button" id="resetView">重置</button>
+            <button type="button" id="chartStockAi">AI分析</button>
             <button type="button" id="closeChart" class="chart-close-button">关闭</button>
           </div>
         </div>
@@ -1076,10 +1104,14 @@ HTML_TEMPLATE = """<!doctype html>
       lastDraw: null,
       positions: [],
       holdingsQuote: null,
+      extraItems: {},
+      extraHistory: {},
       holdingsApiAvailable: true
     };
     const HOLDINGS_API = "api/holdings";
     const STOCK_AI_API = "api/stock-ai";
+    const STOCK_SEARCH_API = "api/stock-search";
+    const KLINE_API = "api/kline";
 
     const fmt = (value, digits = 2) => {
       if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
@@ -1582,7 +1614,7 @@ HTML_TEMPLATE = """<!doctype html>
       return Boolean(dialog?.open);
     }
 
-    function openChart(code) {
+    async function openChart(code) {
       if (!code) return;
       state.code = code;
       state.hoverIndex = null;
@@ -1594,10 +1626,49 @@ HTML_TEMPLATE = """<!doctype html>
           dialog.setAttribute("open", "open");
         }
       }
+      if (!candidateByCode(code) || !historyFor(code).length) {
+        setChartLoading(code);
+        try {
+          await loadKline(code);
+        } catch (error) {
+          setChartError(code, error.message || String(error));
+          return;
+        }
+      }
       setVisibleByBars(DEFAULT_BARS, "120");
       requestAnimationFrame(() => {
         renderChart();
       });
+    }
+
+    async function loadKline(code) {
+      const response = await fetch(`${KLINE_API}?code=${encodeURIComponent(code)}`, { cache: "no-store" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
+      const item = payload.item || {};
+      const normalizedCode = item.code || code;
+      state.extraItems[normalizedCode] = item;
+      state.extraHistory[normalizedCode] = Array.isArray(payload.history) ? payload.history : [];
+      state.code = normalizedCode;
+    }
+
+    function setChartLoading(code) {
+      document.getElementById("chartName").textContent = `${code} K线加载中`;
+      document.getElementById("chartMeta").textContent = "正在从服务器缓存读取历史行情...";
+      [
+        "signalType", "tradeAction", "pressureZone", "spanWeeks",
+        "buyZone", "stopLoss", "activitySource", "touches", "cluster", "atr", "hoverInfo",
+        "financialDate", "growthScore", "revenueYoy", "profitYoy", "roe", "tagDetail"
+      ].forEach(id => {
+        document.getElementById(id).textContent = "-";
+      });
+    }
+
+    function setChartError(code, message) {
+      document.getElementById("chartName").textContent = `${code} K线加载失败`;
+      document.getElementById("chartMeta").textContent = message || "K线数据暂不可用";
     }
 
     function closeChart() {
@@ -1693,6 +1764,50 @@ HTML_TEMPLATE = """<!doctype html>
         "暂无持仓记录。"
       );
       bindReportActions();
+    }
+
+    async function searchStocks() {
+      const input = document.getElementById("stockSearchInput");
+      const status = document.getElementById("stockSearchStatus");
+      const target = document.getElementById("stockSearchResults");
+      const query = (input.value || "").trim();
+      if (!query) {
+        status.textContent = "请输入股票代码或名称。";
+        target.innerHTML = "";
+        return;
+      }
+      status.textContent = "正在搜索...";
+      target.innerHTML = "";
+      try {
+        const response = await fetch(`${STOCK_SEARCH_API}?q=${encodeURIComponent(query)}&limit=12`, { cache: "no-store" });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload.error || `HTTP ${response.status}`);
+        }
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        status.textContent = items.length ? `找到 ${items.length} 只，支持代码和名称模糊搜索。` : "没有匹配结果。";
+        const rows = items.map(item => [
+          escapeHtml(item.code || "-"),
+          escapeHtml(item.name || "-"),
+          escapeHtml(item.latest ? fmt(item.latest) : "-"),
+          escapeHtml(item.pct_change === null || item.pct_change === undefined ? "-" : `${fmt(item.pct_change)}%`),
+          `<button type="button" class="action-button primary" data-chart-code="${escapeHtml(item.code)}">查看K线</button>`,
+        ]);
+        target.innerHTML = renderSimpleTable(
+          [
+            { label: "代码" },
+            { label: "名称", left: true },
+            { label: "最新价" },
+            { label: "涨跌幅" },
+            { label: "操作", left: true },
+          ],
+          rows,
+          "没有匹配结果。"
+        );
+        bindReportActions();
+      } catch (error) {
+        status.textContent = `搜索失败：${error.message || error}`;
+      }
     }
 
     function stockAiPayload(item) {
@@ -1820,11 +1935,11 @@ HTML_TEMPLATE = """<!doctype html>
     }
 
     function candidateByCode(code) {
-      return DASHBOARD.candidates.find(item => item.code === code);
+      return DASHBOARD.candidates.find(item => item.code === code) || state.extraItems[code];
     }
 
     function historyFor(code) {
-      return (DASHBOARD.history[code] || []).filter(row =>
+      return (DASHBOARD.history[code] || state.extraHistory[code] || []).filter(row =>
         row.open !== null && row.high !== null && row.low !== null && row.close !== null
       );
     }
@@ -2046,20 +2161,22 @@ HTML_TEMPLATE = """<!doctype html>
       const allData = historyFor(item.code);
       ensureVisibleWindow();
       const data = allData.slice(state.visibleStart, state.visibleEnd);
+      const hasStrategyData = item.strategyData !== false;
 
       document.getElementById("chartName").textContent = `${item.code} ${item.name}`;
-      document.getElementById("chartMeta").textContent =
-        `${item.signalType || "-"}类 / 收盘 ${fmt(item.latestClose)} / 市值 ${item.circMv > 0 ? fmt(item.circMv, 1) + '亿' : '-'} / 压力上沿 ${fmt(item.zoneUpper || item.resistance)} / 突破 ${fmt(item.breakoutPct)}% / 技术 ${fmt(item.score, 1)} / 成长 ${item.growthScore > 0 ? fmt(item.growthScore, 1) : '-'} / ${item.hint}`;
+      document.getElementById("chartMeta").textContent = hasStrategyData
+        ? `${item.signalType || "-"}类 / 收盘 ${fmt(item.latestClose)} / 市值 ${item.circMv > 0 ? fmt(item.circMv, 1) + '亿' : '-'} / 压力上沿 ${fmt(item.zoneUpper || item.resistance)} / 突破 ${fmt(item.breakoutPct)}% / 技术 ${fmt(item.score, 1)} / 成长 ${item.growthScore > 0 ? fmt(item.growthScore, 1) : '-'} / ${item.hint}`
+        : `搜索K线 / 最新收盘 ${fmt(item.latestClose)} / ${item.hint || "非策略候选，仅查看历史走势"}`;
       document.getElementById("signalType").textContent = `${item.signalType || "-"} ${item.signalReason || ""}`.trim();
       document.getElementById("tradeAction").textContent = item.tradeAction || "-";
-      document.getElementById("pressureZone").textContent = `${fmt(item.zoneLow || item.resistance)} - ${fmt(item.zoneUpper || item.resistance)}`;
-      document.getElementById("spanWeeks").textContent = item.spanWeeks ? `${item.spanWeeks} 周` : "-";
-      document.getElementById("buyZone").textContent = `${fmt(item.buyLow)} - ${fmt(item.buyHigh)}`;
-      document.getElementById("stopLoss").textContent = `${fmt(item.tradeStopLoss || item.stopLoss)} / 结构 ${fmt(item.structureStopLoss || item.stopLoss)}`;
-      document.getElementById("activitySource").textContent = `${item.activitySource === "amount" ? "成交额" : "成交量"} / ${fmt(item.activityRatio || item.volumeRatio)}倍`;
-      document.getElementById("touches").textContent = `${item.touches} 次`;
-      document.getElementById("cluster").textContent = `${item.clusterSize || "-"} 根K线`;
-      document.getElementById("atr").textContent = `${fmt(item.atrPct)}%`;
+      document.getElementById("pressureZone").textContent = hasStrategyData ? `${fmt(item.zoneLow || item.resistance)} - ${fmt(item.zoneUpper || item.resistance)}` : "-";
+      document.getElementById("spanWeeks").textContent = hasStrategyData && item.spanWeeks ? `${item.spanWeeks} 周` : "-";
+      document.getElementById("buyZone").textContent = hasStrategyData ? `${fmt(item.buyLow)} - ${fmt(item.buyHigh)}` : "-";
+      document.getElementById("stopLoss").textContent = hasStrategyData ? `${fmt(item.tradeStopLoss || item.stopLoss)} / 结构 ${fmt(item.structureStopLoss || item.stopLoss)}` : "-";
+      document.getElementById("activitySource").textContent = hasStrategyData ? `${item.activitySource === "amount" ? "成交额" : "成交量"} / ${fmt(item.activityRatio || item.volumeRatio)}倍` : "-";
+      document.getElementById("touches").textContent = hasStrategyData ? `${item.touches} 次` : "-";
+      document.getElementById("cluster").textContent = hasStrategyData ? `${item.clusterSize || "-"} 根K线` : "-";
+      document.getElementById("atr").textContent = hasStrategyData ? `${fmt(item.atrPct)}%` : "-";
       document.getElementById("financialDate").textContent = item.financialEndDate || "-";
       document.getElementById("growthScore").textContent = item.growthScore > 0 ? fmt(item.growthScore, 1) : "-";
       document.getElementById("revenueYoy").textContent = fmtPct(item.revenueYoy);
@@ -2082,8 +2199,10 @@ HTML_TEMPLATE = """<!doctype html>
       const volumeBottom = height - 26;
       const highs = data.map(row => row.high);
       const lows = data.map(row => row.low);
-      highs.push(item.zoneUpper || item.resistance, item.zoneMid || item.resistance, item.buyHigh, item.stopLoss);
-      lows.push(item.zoneLow || item.resistance, item.zoneMid || item.resistance, item.buyLow, item.stopLoss);
+      if (hasStrategyData) {
+        highs.push(item.zoneUpper || item.resistance, item.zoneMid || item.resistance, item.buyHigh, item.stopLoss);
+        lows.push(item.zoneLow || item.resistance, item.zoneMid || item.resistance, item.buyLow, item.stopLoss);
+      }
       let maxPrice = Math.max(...highs);
       let minPrice = Math.min(...lows);
       const pad = Math.max((maxPrice - minPrice) * 0.08, maxPrice * 0.01, 0.5);
@@ -2123,17 +2242,19 @@ HTML_TEMPLATE = """<!doctype html>
       ctx.lineTo(right, volumeTop);
       ctx.stroke();
 
-      const buyY1 = yScale(item.buyHigh, minPrice, maxPrice, top, priceBottom);
-      const buyY2 = yScale(item.buyLow, minPrice, maxPrice, top, priceBottom);
-      ctx.fillStyle = "rgba(31, 111, 235, 0.08)";
-      ctx.fillRect(left, Math.min(buyY1, buyY2), right - left, Math.abs(buyY2 - buyY1));
-      const zoneLowY = yScale(item.zoneLow || item.resistance, minPrice, maxPrice, top, priceBottom);
-      const zoneUpperY = yScale(item.zoneUpper || item.resistance, minPrice, maxPrice, top, priceBottom);
-      ctx.fillStyle = "rgba(183, 110, 0, 0.09)";
-      ctx.fillRect(left, Math.min(zoneLowY, zoneUpperY), right - left, Math.abs(zoneUpperY - zoneLowY));
-      drawLine(yScale(item.zoneUpper || item.resistance, minPrice, maxPrice, top, priceBottom), "#1f6feb", "压力上沿");
-      drawLine(yScale(item.zoneMid || item.resistance, minPrice, maxPrice, top, priceBottom), "#667085", "压力中枢");
-      drawLine(yScale(item.stopLoss, minPrice, maxPrice, top, priceBottom), "#b76e00", "止损");
+      if (hasStrategyData) {
+        const buyY1 = yScale(item.buyHigh, minPrice, maxPrice, top, priceBottom);
+        const buyY2 = yScale(item.buyLow, minPrice, maxPrice, top, priceBottom);
+        ctx.fillStyle = "rgba(31, 111, 235, 0.08)";
+        ctx.fillRect(left, Math.min(buyY1, buyY2), right - left, Math.abs(buyY2 - buyY1));
+        const zoneLowY = yScale(item.zoneLow || item.resistance, minPrice, maxPrice, top, priceBottom);
+        const zoneUpperY = yScale(item.zoneUpper || item.resistance, minPrice, maxPrice, top, priceBottom);
+        ctx.fillStyle = "rgba(183, 110, 0, 0.09)";
+        ctx.fillRect(left, Math.min(zoneLowY, zoneUpperY), right - left, Math.abs(zoneUpperY - zoneLowY));
+        drawLine(yScale(item.zoneUpper || item.resistance, minPrice, maxPrice, top, priceBottom), "#1f6feb", "压力上沿");
+        drawLine(yScale(item.zoneMid || item.resistance, minPrice, maxPrice, top, priceBottom), "#667085", "压力中枢");
+        drawLine(yScale(item.stopLoss, minPrice, maxPrice, top, priceBottom), "#b76e00", "止损");
+      }
 
       data.forEach((row, idx) => {
         const x = left + step * idx + step / 2;
@@ -2345,6 +2466,16 @@ HTML_TEMPLATE = """<!doctype html>
     document.getElementById("closeChart").addEventListener("click", closeChart);
     document.getElementById("chartDialog").addEventListener("click", (event) => {
       if (event.target === event.currentTarget) closeChart();
+    });
+    document.getElementById("chartStockAi").addEventListener("click", () => {
+      openStockAi(state.code);
+    });
+    document.getElementById("stockSearchButton").addEventListener("click", searchStocks);
+    document.getElementById("stockSearchInput").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        searchStocks();
+      }
     });
 
     document.getElementById("cancelPosition").addEventListener("click", () => {

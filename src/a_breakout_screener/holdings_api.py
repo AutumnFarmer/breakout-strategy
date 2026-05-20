@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import json
+import os
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -10,18 +11,20 @@ import threading
 import time
 from tempfile import NamedTemporaryFile
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
 import pandas as pd
 
 from .ai_analysis import generate_single_stock_analysis
 from .config import load_config
-from .data import fetch_realtime_spot, fetch_spot
+from .data import _call_tushare, fetch_history, fetch_realtime_spot, fetch_spot
 
 
 DEFAULT_DATA_FILE = Path("data/holdings/positions.json")
 QUOTE_CACHE_TTL_SECONDS = 20
+SEARCH_CACHE_TTL_SECONDS = 300
+STOCK_UNIVERSE_CACHE_NAME = "stock_universe.csv"
 _QUOTE_CACHE_LOCK = threading.Lock()
 _QUOTE_CACHE: dict[str, Any] = {
     "expires_at": 0.0,
@@ -30,6 +33,8 @@ _QUOTE_CACHE: dict[str, Any] = {
     "last_success_quotes": {},
     "last_success_meta": {},
 }
+_SEARCH_CACHE_LOCK = threading.Lock()
+_SEARCH_CACHE: dict[str, Any] = {"expires_at": 0.0, "items": []}
 
 
 def load_positions(data_file: Path) -> list[dict[str, Any]]:
@@ -207,6 +212,230 @@ def _optional_float(value: object) -> float | None:
     return number
 
 
+def search_stocks(query: str, limit: int = 12) -> list[dict[str, Any]]:
+    query = query.strip()
+    if not query:
+        return []
+    normalized = query.zfill(6) if query.isdigit() else query
+    normalized_name_query = _normalize_search_text(query)
+    items = _cached_stock_universe()
+    matches: list[tuple[int, dict[str, Any]]] = []
+    query_lower = query.lower()
+    for item in items:
+        code = str(item.get("code") or "")
+        name = str(item.get("name") or "")
+        name_lower = name.lower()
+        normalized_name = _normalize_search_text(name)
+        score: int | None = None
+        if code == normalized:
+            score = 0
+        elif query.isdigit() and code.startswith(query):
+            score = 1
+        elif query.isdigit() and query in code:
+            score = 2
+        elif name == query:
+            score = 3
+        elif name.startswith(query):
+            score = 4
+        elif query_lower and query_lower in name_lower:
+            score = 5
+        elif normalized_name_query and normalized_name_query in normalized_name:
+            score = 6
+        elif normalized_name_query and _is_subsequence(normalized_name_query, normalized_name):
+            score = 7
+        if score is not None:
+            matches.append((score, item))
+    matches.sort(key=lambda pair: (pair[0], str(pair[1].get("code") or "")))
+    return [item for _, item in matches[: max(1, limit)]]
+
+
+def load_kline_payload(code: str, data_file: Path) -> dict[str, Any]:
+    raw_code = str(code or "").strip()
+    if not raw_code:
+        raise ValueError("code is required")
+    code = raw_code.zfill(6)
+    config = load_config(Path("config.toml"))
+    end_date = date.today()
+    start_date = end_date - timedelta(days=max(365, config.screener.history_days))
+    history = fetch_history(
+        symbol=code,
+        start_date=start_date,
+        end_date=end_date,
+        cache_dir=config.paths.cache_dir,
+        force_refresh=False,
+        allow_truncated_start=True,
+    )
+    if history.empty:
+        raise ValueError(f"{code} kline history is unavailable")
+    universe = {item["code"]: item for item in _cached_stock_universe()}
+    stock = universe.get(code, {"code": code, "name": code})
+    latest_close = _optional_float(history.sort_values("date").iloc[-1].get("close")) or 0.0
+    item = {
+        "code": code,
+        "name": stock.get("name") or code,
+        "signalType": "K线",
+        "signalReason": "",
+        "primaryTag": "搜索结果",
+        "latestClose": round(latest_close, 4),
+        "circMv": 0,
+        "score": 0,
+        "growthScore": 0,
+        "tags": [],
+        "strategyData": False,
+        "tradeAction": "仅查看K线",
+        "hint": "搜索结果，不代表策略候选",
+    }
+    return {
+        "item": item,
+        "history": _history_records(history),
+        "source": "cache_or_data_source",
+    }
+
+
+def _history_records(history: pd.DataFrame) -> list[dict[str, Any]]:
+    df = history.sort_values("date").tail(900).copy()
+    records: list[dict[str, Any]] = []
+    for _, row in df.iterrows():
+        records.append(
+            {
+                "date": pd.Timestamp(row["date"]).date().isoformat(),
+                "open": _optional_float(row.get("open")),
+                "high": _optional_float(row.get("high")),
+                "low": _optional_float(row.get("low")),
+                "close": _optional_float(row.get("close")),
+                "volume": _optional_float(row.get("volume")),
+            }
+        )
+    return records
+
+
+def _cached_stock_universe() -> list[dict[str, Any]]:
+    now = time.time()
+    with _SEARCH_CACHE_LOCK:
+        if now < float(_SEARCH_CACHE.get("expires_at") or 0):
+            return list(_SEARCH_CACHE.get("items") or [])
+        config = load_config(Path("config.toml"))
+        items = _read_stock_universe_cache(config.paths.cache_dir)
+        if not items:
+            items = _stock_items_from_tushare_basic()
+            if items:
+                _write_stock_universe_cache(config.paths.cache_dir, items)
+        if not items:
+            try:
+                spot = fetch_spot()
+                items = _stock_items_from_spot(spot)
+                if not items:
+                    raise RuntimeError("stock universe is empty")
+                _write_stock_universe_cache(config.paths.cache_dir, items)
+            except Exception:  # pragma: no cover - network/data-source fallback path
+                items = _stock_items_from_hist_cache(config.paths.cache_dir)
+        _SEARCH_CACHE["expires_at"] = now + SEARCH_CACHE_TTL_SECONDS
+        _SEARCH_CACHE["items"] = items
+        return list(items)
+
+
+def _stock_items_from_spot(spot: pd.DataFrame) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    if spot.empty:
+        return items
+    df = spot.copy()
+    df["code"] = df["code"].astype(str).str.extract(r"(\d{6})", expand=False).str.zfill(6)
+    for _, row in df.dropna(subset=["code"]).iterrows():
+        code = str(row.get("code") or "").zfill(6)
+        latest = _optional_float(row.get("latest"))
+        items.append(
+            {
+                "code": code,
+                "name": str(row.get("name") or code),
+                "latest": round(latest, 4) if latest is not None else None,
+                "pct_change": _optional_float(row.get("pct_change")),
+            }
+        )
+    return items
+
+
+def _stock_items_from_hist_cache(cache_dir: Path) -> list[dict[str, Any]]:
+    hist_dir = cache_dir / "hist"
+    if not hist_dir.is_dir():
+        return []
+    return [{"code": path.stem.zfill(6), "name": path.stem.zfill(6)} for path in sorted(hist_dir.glob("*.csv"))]
+
+
+def _stock_items_from_tushare_basic() -> list[dict[str, Any]]:
+    try:
+        from .tushare_client import get_tushare_pro
+
+        pro = get_tushare_pro()
+        raw = _call_tushare(
+            "stock_basic",
+            lambda: pro.stock_basic(exchange="", list_status="L", fields="ts_code,symbol,name"),
+        )
+    except Exception:  # pragma: no cover - external data-source fallback path
+        return []
+    if raw is None or raw.empty:
+        return []
+    df = raw.copy()
+    if "symbol" in df.columns:
+        df["code"] = df["symbol"].astype(str).str.extract(r"(\d{6})", expand=False).str.zfill(6)
+    else:
+        df["code"] = df["ts_code"].astype(str).str.extract(r"(\d{6})", expand=False).str.zfill(6)
+    df["name"] = df["name"].fillna(df["code"]).astype(str)
+    return [
+        {"code": str(row["code"]).zfill(6), "name": str(row["name"]), "latest": None, "pct_change": None}
+        for _, row in df.dropna(subset=["code"]).iterrows()
+    ]
+
+
+def _read_stock_universe_cache(cache_dir: Path) -> list[dict[str, Any]]:
+    path = cache_dir / STOCK_UNIVERSE_CACHE_NAME
+    if not path.exists():
+        return []
+    try:
+        df = pd.read_csv(path, dtype={"code": str})
+    except Exception:
+        return []
+    if "code" not in df.columns or "name" not in df.columns:
+        return []
+    df["code"] = df["code"].astype(str).str.extract(r"(\d{6})", expand=False).str.zfill(6)
+    df["name"] = df["name"].fillna(df["code"]).astype(str)
+    items: list[dict[str, Any]] = []
+    for _, row in df.dropna(subset=["code"]).iterrows():
+        latest = _optional_float(row.get("latest"))
+        items.append(
+            {
+                "code": str(row["code"]).zfill(6),
+                "name": str(row["name"]),
+                "latest": round(latest, 4) if latest is not None else None,
+                "pct_change": _optional_float(row.get("pct_change")),
+            }
+        )
+    return items
+
+
+def _write_stock_universe_cache(cache_dir: Path, items: list[dict[str, Any]]) -> None:
+    if not items:
+        return
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / STOCK_UNIVERSE_CACHE_NAME
+    pd.DataFrame(items).to_csv(path, index=False, encoding="utf-8-sig")
+
+
+def _normalize_search_text(value: str) -> str:
+    return "".join(str(value or "").lower().split())
+
+
+def _is_subsequence(needle: str, haystack: str) -> bool:
+    if not needle:
+        return False
+    position = 0
+    for char in haystack:
+        if char == needle[position]:
+            position += 1
+            if position == len(needle):
+                return True
+    return False
+
+
 def create_position(data: dict[str, Any]) -> dict[str, Any]:
     code = str(data.get("code") or "").strip()
     name = str(data.get("name") or "").strip()
@@ -241,13 +470,30 @@ class HoldingsHandler(BaseHTTPRequestHandler):
     data_file = DEFAULT_DATA_FILE
 
     def do_GET(self) -> None:  # noqa: N802
-        path = urlparse(self.path).path.rstrip("/")
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
         if path.endswith("/health"):
             self._send_json({"ok": True})
             return
         if path.endswith("/holdings"):
             positions, quote_meta = positions_with_latest_quotes(load_positions(self.data_file))
             self._send_json({"positions": positions, "quote": quote_meta})
+            return
+        if path.endswith("/stock-search"):
+            params = parse_qs(parsed.query)
+            query = (params.get("q") or [""])[0]
+            limit = int((params.get("limit") or ["12"])[0] or 12)
+            self._send_json({"items": search_stocks(query, limit=limit)})
+            return
+        if path.endswith("/kline"):
+            params = parse_qs(parsed.query)
+            code = (params.get("code") or [""])[0]
+            try:
+                self._send_json(load_kline_payload(code, self.data_file))
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            except Exception as exc:  # pragma: no cover - network/data-source fallback path
+                self._send_json({"error": f"K线数据暂不可用：{exc}"}, HTTPStatus.BAD_GATEWAY)
             return
         self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -347,9 +593,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--data-file", type=Path, default=DEFAULT_DATA_FILE)
+    parser.add_argument("--env-file", default=".env")
     args = parser.parse_args(argv)
+    if args.env_file:
+        _load_env_file(Path(args.env_file))
+    _apply_network_env(load_config(Path("config.toml")))
     run_server(args.host, args.port, args.data_file.expanduser().resolve())
     return 0
+
+
+def _load_env_file(path: Path) -> None:
+    path = path.expanduser()
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+def _apply_network_env(config) -> None:
+    if config.network.disable_system_proxy:
+        os.environ.setdefault("NO_PROXY", "*")
+        os.environ.setdefault("no_proxy", "*")
 
 
 if __name__ == "__main__":
