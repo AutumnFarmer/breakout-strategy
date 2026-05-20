@@ -88,6 +88,16 @@ def fetch_spot() -> pd.DataFrame:
     return _fetch_spot_from_akshare()
 
 
+def fetch_realtime_spot() -> pd.DataFrame:
+    """Fetch the live A-share spot table.
+
+    This intentionally bypasses Tushare daily bars because holdings need the
+    freshest quote available for intraday PnL display.
+    """
+
+    return _fetch_spot_from_akshare()
+
+
 def _fetch_spot_from_tushare() -> pd.DataFrame:
     from .tushare_client import get_tushare_pro
 

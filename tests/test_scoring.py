@@ -56,6 +56,17 @@ def test_activity_ratio_prefers_amount() -> None:
     assert ratio == 3.0
 
 
+def test_a_signal_downgrades_when_close_is_weak() -> None:
+    history = _sample_history(latest_close=12.5, latest_volume=3_000_000)
+    history.loc[history.index[-1], "open"] = 12.7
+
+    candidate = evaluate_stock("000001", "平安银行", history, ScreenerConfig(min_history_rows=120), is_week_confirmed=True)
+
+    assert candidate is not None
+    assert candidate.signal_type == "B"
+    assert "收盘强度" in candidate.signal_reason
+
+
 def test_c1_for_strong_overextended_breakout() -> None:
     signal_type, _, trade_action = _classify_signal(
         breakout_pct=0.10,

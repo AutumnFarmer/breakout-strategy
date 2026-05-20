@@ -63,6 +63,32 @@
 
 邮件正文使用 Markdown 报告，附件包含 CSV、Excel 和 HTML 仪表盘。
 
+## 实盘化 first-signal 回测
+
+单独命令 `backtest-first-signal-executable` 使用本地历史缓存做首次信号的实盘化近似回测，不会联网拉取行情或交易日历；交易日历只读本地 `trade_cal` 缓存，缺失时按保守口径处理，只有周五可视为周线确认。旧命令 `backtest-first-signal` 保留固定金额研究口径，用于兼容原有输出。
+
+```bash
+uv run a-breakout --config config.toml backtest-first-signal-executable \
+  --lot-size 100 \
+  --max-capital-per-trade 5000 \
+  --max-total-capital 200000 \
+  --min-capital-per-trade 0 \
+  --max-buys-per-day 3 \
+  --max-theme-buys-per-day 2 \
+  --slippage-bps 10 \
+  --fee-bps 3 \
+  --min-fee 5 \
+  --sell-tax-bps 5 \
+  --buy-signal-types A
+```
+
+该模式按交易日回放首次信号，默认只买入 A 类周线确认；B/C1/C2 只进入观察统计，不会消耗后续 A 类买点。需要研究 B 类小仓试错时可显式传 `--buy-signal-types A,B`，避免默认把日线预警和 A 类买点混成同一口径。买入日先取信号日后的下一全市场交易日作为 `target_entry_date`，只有个股当日有 K 线且可交易时才按开盘价和 `lot_size` 整手买入；停牌或缺该日行情会跳过并记录过滤原因。A 股 T+1 规则按最早 `entry_date` 后一交易日退出模拟，买入当天即使触及止损也不会当天卖出。涨停不可买过滤按代码/名称区分主板 10%、创业板/科创板 20%、ST 5% 和北交所 30% 的近似阈值。交易日历缓存若未覆盖完整自然周，不会把周三或周四误判成周线确认。
+
+如果一手成本加最低佣金超过 `max_capital_per_trade` 则跳过。设置 `max_total_capital` 后会按实际 `entry_date` 开始统计持仓占用，默认 0 表示只统计峰值占用、不限制总资金。同一天最多新增 `max_buys_per_day` 只，传 0 可做纯观察 dry-run；同一主标签最多新增 `max_theme_buys_per_day` 只。对 `--buy-signal-types` 内的买入信号，首次出现就是一次执行机会；若因日内限流、题材限额、资金约束、一手过贵或目标买入日不可交易跳过，后续重复买入信号不再追买，并在过滤统计中记录为机会损失。主标签来自本地 `stock_tags` 缓存，缺失时会进入 `UNKNOWN` 主题桶参与限额，汇总里会标明题材标签缓存覆盖率和候选覆盖率。
+
+输出目录为 `outputs/backtest/<date>/first_signal_executable/`。`first_signal_executable_trades.csv` 会同时保留 `backtest_mode`、`signal_date`、`target_entry_date`、实际 `entry_date`、原始开盘/卖出价、滑点后的有效成交价、量能来源、整手数、实际投入、买卖费用、资金占用和 PnL；`first_signal_executable_summary.csv` 汇总总投入、含买入费的现金投入、总收益、胜率、止损率、最大持仓数、峰值资金占用、总资金约束跳过数量和一手过贵跳过数量。费用模型包含 `fee_bps` 比例佣金、`min_fee` 单边最低佣金和 `sell_tax_bps` 卖出侧印花税。
+
 ## 风险边界
 
 这是观察清单，不是自动交易系统。邮件里的买入区、止损位和仓位提示只用于二次判断，不应直接作为下单指令。
+实盘化回测仍然只是基于历史缓存的近似模拟，不是收益承诺；真实成交还会受到涨跌停、盘口深度、停牌、税费细则和人工执行延迟影响。

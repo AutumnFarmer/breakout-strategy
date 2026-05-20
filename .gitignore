@@ -8,6 +8,7 @@ logs/
 .env
 config.toml
 data/cache/
+data/holdings/
 outputs/
 site/
 dist/

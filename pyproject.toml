@@ -14,6 +14,7 @@ dependencies = [
 
 [project.scripts]
 a-breakout = "a_breakout_screener.cli:main"
+a-breakout-holdings-api = "a_breakout_screener.holdings_api:main"
 
 [dependency-groups]
 dev = [
